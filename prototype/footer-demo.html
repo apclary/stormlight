@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stormlight footer shortcut variants</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #151719;
+      color: #d7dee5;
+      font-family: Inter, system-ui, sans-serif;
+    }
+    main {
+      width: min(1320px, calc(100% - 48px));
+      margin: 36px auto 48px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+    .intro {
+      margin: 0 0 28px;
+      color: #929da6;
+      font-size: 14px;
+    }
+    section {
+      padding: 18px 0 22px;
+      border-top: 1px solid #343a40;
+    }
+    .heading {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    h2 {
+      margin: 0;
+      min-width: 180px;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+    .description {
+      color: #929da6;
+      font-size: 13px;
+    }
+    pre {
+      width: 100%;
+      min-height: 54px;
+      overflow: hidden;
+      margin: 0;
+      padding: 9px 12px;
+      background: #0d0f11;
+      border: 1px solid #2e3439;
+      border-radius: 4px;
+      color: #d7dee5;
+      font: 14px/1.45 "DejaVu Sans Mono", monospace;
+      letter-spacing: 0;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Footer shortcut differentiation</h1>
+    <p class="intro">Real 120-column Stormlight output, dark terminal palette.</p>
+
+    <section>
+      <div class="heading">
+        <h2>Current · Middle dots</h2>
+        <span class="description">Uniform tone and compact separators.</span>
+      </div>
+      <pre data-capture="current"></pre>
+    </section>
+
+    <section>
+      <div class="heading">
+        <h2>A · Vertical rules</h2>
+        <span class="description">Strong command boundaries; widest treatment.</span>
+      </div>
+      <pre data-capture="A"></pre>
+    </section>
+
+    <section>
+      <div class="heading">
+        <h2>B · Tonal keys</h2>
+        <span class="description">Blue bold shortcuts, pale actions, muted dots.</span>
+      </div>
+      <pre data-capture="B"></pre>
+    </section>
+
+    <section>
+      <div class="heading">
+        <h2>C · Keycaps</h2>
+        <span class="description">Filled shortcut blocks create visible pair anchors.</span>
+      </div>
+      <pre data-capture="C"></pre>
+    </section>
+
+    <section>
+      <div class="heading">
+        <h2>D · Mapping arrows</h2>
+        <span class="description">Explicit shortcut-to-operation relationship.</span>
+      </div>
+      <pre data-capture="D"></pre>
+    </section>
+  </main>
+  <script>
+    const escapeHTML = (text) => text
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+
+    function ansiToHTML(input) {
+      let bold = false;
+      let foreground = "";
+      let background = "";
+      let cursor = 0;
+      let output = "";
+      const pattern = /\x1b\[([0-9;]*)m/g;
+
+      const append = (text) => {
+        if (!text) return;
+        const styles = [];
+        if (bold) styles.push("font-weight:700");
+        if (foreground) styles.push(`color:${foreground}`);
+        if (background) styles.push(`background:${background}`);
+        const escaped = escapeHTML(text);
+        output += styles.length
+          ? `<span style="${styles.join(";")}">${escaped}</span>`
+          : escaped;
+      };
+
+      for (const match of input.matchAll(pattern)) {
+        append(input.slice(cursor, match.index));
+        const codes = (match[1] || "0").split(";").map(Number);
+        for (let index = 0; index < codes.length; index++) {
+          const code = codes[index];
+          if (code === 0) {
+            bold = false;
+            foreground = "";
+            background = "";
+          } else if (code === 1) {
+            bold = true;
+          } else if (code === 22) {
+            bold = false;
+          } else if (code === 39) {
+            foreground = "";
+          } else if (code === 49) {
+            background = "";
+          } else if (code === 38 && codes[index + 1] === 2) {
+            foreground = `rgb(${codes[index + 2]},${codes[index + 3]},${codes[index + 4]})`;
+            index += 4;
+          } else if (code === 48 && codes[index + 1] === 2) {
+            background = `rgb(${codes[index + 2]},${codes[index + 3]},${codes[index + 4]})`;
+            index += 4;
+          }
+        }
+        cursor = match.index + match[0].length;
+      }
+      append(input.slice(cursor));
+      return output;
+    }
+
+    Promise.all(
+      [...document.querySelectorAll("[data-capture]")].map(async (element) => {
+        const name = element.dataset.capture;
+        const response = await fetch(`footer-demo/${name}.ansi`);
+        const lines = (await response.text()).trimEnd().split("\n");
+        element.innerHTML = ansiToHTML(lines.slice(-2).join("\n"));
+      }),
+    );
+  </script>
+</body>
+</html>

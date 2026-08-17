@@ -6,6 +6,7 @@ package ui
 import (
 	"fmt"
 	"math"
+	"os"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -161,12 +162,85 @@ func (m Model) chordHints() string {
 // neighbors, so the row reads as separate key–action pairs instead of one
 // run-on line. The items arrive unstyled; the caller picks the ink.
 func renderHints(items []string, style lipgloss.Style) string {
+	// PROTOTYPE: four footer treatments, selected with
+	// STORMLIGHT_FOOTER_VARIANT=A|B|C|D.
+	switch os.Getenv("STORMLIGHT_FOOTER_VARIANT") {
+	case "A":
+		return renderSeparatedHints(items, style)
+	case "B":
+		return renderTonalHints(items, style)
+	case "C":
+		return renderKeycapHints(items, style)
+	case "D":
+		return renderMappedHints(items, style)
+	}
 	separator := mutedStyle().Render(" · ")
 	rendered := make([]string, len(items))
 	for index, item := range items {
 		rendered[index] = style.Render(item)
 	}
 	return strings.Join(rendered, separator)
+}
+
+func renderSeparatedHints(items []string, style lipgloss.Style) string {
+	separator := lipgloss.NewStyle().
+		Foreground(colorBorder()).
+		Render("  │  ")
+	rendered := make([]string, len(items))
+	for index, item := range items {
+		rendered[index] = style.Render(item)
+	}
+	return strings.Join(rendered, separator)
+}
+
+func splitHint(item string) (string, string) {
+	key, action, found := strings.Cut(item, " ")
+	if !found {
+		return item, ""
+	}
+	return key, action
+}
+
+func renderTonalHints(items []string, style lipgloss.Style) string {
+	separator := mutedStyle().Render("  ·  ")
+	rendered := make([]string, len(items))
+	for index, item := range items {
+		key, action := splitHint(item)
+		rendered[index] = accentStyle().Render(key)
+		if action != "" {
+			rendered[index] += " " + style.Render(action)
+		}
+	}
+	return strings.Join(rendered, separator)
+}
+
+func renderKeycapHints(items []string, style lipgloss.Style) string {
+	keycap := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorSelectedText()).
+		Background(colorBorder())
+	rendered := make([]string, len(items))
+	for index, item := range items {
+		key, action := splitHint(item)
+		rendered[index] = keycap.Render(" " + key + " ")
+		if action != "" {
+			rendered[index] += " " + style.Render(action)
+		}
+	}
+	return strings.Join(rendered, "  ")
+}
+
+func renderMappedHints(items []string, style lipgloss.Style) string {
+	arrow := mutedStyle().Render("→")
+	rendered := make([]string, len(items))
+	for index, item := range items {
+		key, action := splitHint(item)
+		rendered[index] = accentStyle().Render(key)
+		if action != "" {
+			rendered[index] += " " + arrow + " " + style.Render(action)
+		}
+	}
+	return strings.Join(rendered, mutedStyle().Render("   "))
 }
 
 // renderFooterError lets an error talk over the left end of the hint row.
