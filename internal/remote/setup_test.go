@@ -26,6 +26,7 @@ printf 'platform=Linux x86_64\n'
 printf 'home=/home/trent\n'
 printf 'stormlight=/home/trent/.local/bin/stormlight\n'
 printf 'stormlight_version=stormlight version v0.2.2\n'
+printf 'stormlight_protocol=2\n'
 printf 'package_manager=apt-get\n'`)
 
 	report, err := Probe(context.Background(), transport)
@@ -37,6 +38,9 @@ printf 'package_manager=apt-get\n'`)
 	}
 	if !report.Stormlight.Present() || report.Stormlight.Version == "" {
 		t.Fatalf("stormlight = %+v", report.Stormlight)
+	}
+	if report.StormlightProtocol != 2 {
+		t.Fatalf("stormlight protocol = %d", report.StormlightProtocol)
 	}
 	// Yazi said nothing, so it is missing — and that is not fatal.
 	if report.Yazi.Present() {

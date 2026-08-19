@@ -37,6 +37,17 @@ type sshAddr string
 func (a sshAddr) Network() string { return "ssh" }
 func (a sshAddr) String() string  { return string(a) }
 
+// remoteCommandError preserves the remote shell's useful diagnostic while
+// letting the transport distinguish an unavailable command from connection
+// and program failures that must not trigger path discovery.
+type remoteCommandError struct {
+	err      error
+	exitCode int
+}
+
+func (e *remoteCommandError) Error() string { return e.err.Error() }
+func (e *remoteCommandError) Unwrap() error { return e.err }
+
 // syncBuffer collects the child's stderr without racing the reader that
 // reports it.
 type syncBuffer struct {
@@ -127,10 +138,18 @@ func (c *stdioConn) exitFailure() error {
 	if c.waitErr == nil {
 		return nil
 	}
+	var failure error
 	if message := c.stderr.String(); message != "" {
-		return errors.New(Explain(string(c.address), message))
+		failure = errors.New(Explain(string(c.address), message))
+	} else {
+		failure = fmt.Errorf("%s: %w", c.address, c.waitErr)
 	}
-	return fmt.Errorf("%s: %w", c.address, c.waitErr)
+	var exitErr *exec.ExitError
+	if errors.As(c.waitErr, &exitErr) &&
+		(exitErr.ExitCode() == 126 || exitErr.ExitCode() == 127) {
+		return &remoteCommandError{err: failure, exitCode: exitErr.ExitCode()}
+	}
+	return failure
 }
 
 // Close ends the connection and lets the child go. Closing our end of its

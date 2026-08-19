@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -65,20 +67,16 @@ func (h Host) sshProgram() string {
 	return "ssh"
 }
 
-func (h Host) bin() string {
-	if h.Bin != "" {
-		return h.Bin
-	}
-	return defaultBin
-}
-
 // Transport dials one host's daemon. It is the thing a windrunner client
 // is built on, and it remembers what the far side said about itself.
 type Transport struct {
 	host Host
 
-	mu    sync.Mutex
-	hello Hello
+	mu          sync.Mutex
+	hello       Hello
+	resolvedBin string
+
+	resolveMu sync.Mutex
 }
 
 func NewTransport(host Host) *Transport { return &Transport{host: host} }
@@ -97,19 +95,111 @@ func (t *Transport) Hello() Hello {
 // asks for a connection: for the control plane, for the event feed, and
 // once per attached terminal.
 func (t *Transport) Dial() (net.Conn, error) {
-	conn, err := dialCommand(t.Command(nil, "_wrbridge"), t.host.destination())
+	attemptedBin := t.bin()
+	conn, err := t.dialBridge(attemptedBin)
+	if err == nil {
+		return conn, nil
+	}
+	var commandErr *remoteCommandError
+	if !errors.As(err, &commandErr) {
+		return nil, t.reachError(err)
+	}
+	if t.host.Bin != "" {
+		return nil, fmt.Errorf(
+			"reach %s: configured binary %q could not be run: %w; "+
+				"run `stormlight remote setup %s --install`, then set "+
+				"[hosts.%s].bin to the installed path it reports",
+			t.host.Name, t.host.Bin, err, t.host.Name, t.host.Name)
+	}
+	if commandErr.exitCode != 127 {
+		return nil, t.reachError(err)
+	}
+	resolved, resolveErr := t.resolveDefaultBin(attemptedBin)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("reach %s: %w", t.host.Name, resolveErr)
+	}
+	conn, err = t.dialBridge(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("reach %s: %w", t.host.Name, err)
+		return nil, t.reachError(err)
+	}
+	return conn, nil
+}
+
+func (t *Transport) reachError(err error) error {
+	var mismatch *protocolMismatchError
+	if errors.As(err, &mismatch) {
+		return fmt.Errorf("reach %s: %s", t.host.Name, mismatch.message(t.host.Name))
+	}
+	return fmt.Errorf("reach %s: %w", t.host.Name, err)
+}
+
+func (t *Transport) dialBridge(bin string) (net.Conn, error) {
+	command := exec.Command(
+		t.host.sshProgram(),
+		t.sshArgsForBin(false, nil, bin, []string{"_wrbridge"})...)
+	conn, err := dialCommand(command, t.host.destination())
+	if err != nil {
+		return nil, err
 	}
 	hello, err := Handshake(conn)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("reach %s: %w", t.host.Name, err)
+		return nil, err
 	}
 	t.mu.Lock()
 	t.hello = hello
+	if t.host.Bin == "" && path.IsAbs(hello.Bin) {
+		t.resolvedBin = hello.Bin
+	}
 	t.mu.Unlock()
 	return conn, nil
+}
+
+func (t *Transport) resolveDefaultBin(failedBin string) (string, error) {
+	// Several windrunner connections can fail together on first contact.
+	// Serialize only this recovery path so one lookup supplies every retry.
+	t.resolveMu.Lock()
+	defer t.resolveMu.Unlock()
+
+	if bin := t.bin(); bin != failedBin {
+		return bin, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
+	command := t.ShellCommand(ctx,
+		"shell=${SHELL:-/bin/sh}\nexec \"$shell\" -lc 'command -v stormlight'\n")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message != "" {
+			return "", fmt.Errorf(
+				"stormlight is not available through the remote login shell: %s; "+
+					"run `stormlight remote setup %s --install`",
+				message, t.host.Name)
+		}
+		return "", fmt.Errorf(
+			"stormlight is not available through the remote login shell: %w; "+
+				"run `stormlight remote setup %s --install`",
+			err, t.host.Name)
+	}
+	var resolved string
+	for _, line := range strings.Split(string(output), "\n") {
+		candidate := strings.TrimSpace(line)
+		if path.IsAbs(candidate) {
+			resolved = candidate
+		}
+	}
+	if resolved == "" {
+		return "", fmt.Errorf(
+			"stormlight is not on the remote login PATH; "+
+				"run `stormlight remote setup %s --install` or set [hosts.%s].bin",
+			t.host.Name, t.host.Name)
+	}
+	t.mu.Lock()
+	t.resolvedBin = resolved
+	t.mu.Unlock()
+	return resolved, nil
 }
 
 // Command builds an ssh invocation of the remote stormlight. The
@@ -190,19 +280,38 @@ func (t *Transport) sshOptions(tty bool) []string {
 }
 
 func (t *Transport) sshArgs(tty bool, env, args []string) []string {
+	return t.sshArgsForBin(tty, env, t.bin(), args)
+}
+
+func (t *Transport) sshArgsForBin(tty bool, env []string, bin string, args []string) []string {
 	sshArgs := t.sshOptions(tty)
 	sshArgs = append(sshArgs, t.host.destination())
-	remote := make([]string, 0, len(args)+1)
-	remote = append(remote, t.host.bin())
-	remote = append(remote, args...)
 	// The far side is a login shell, not an argv. Anything with a space
 	// in it — a workspace path, a task — comes apart without this.
-	command := shellQuote(remote)
+	command := remoteCommand(bin, args)
 	if len(env) > 0 {
 		command = shellQuoteAssignments(env) + " " + command
 	}
 	sshArgs = append(sshArgs, command)
 	return sshArgs
+}
+
+func remoteCommand(bin string, args []string) string {
+	remote := []string{bin}
+	remote = append(remote, args...)
+	return shellQuote(remote)
+}
+
+func (t *Transport) bin() string {
+	if t.host.Bin != "" {
+		return t.host.Bin
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.resolvedBin != "" {
+		return t.resolvedBin
+	}
+	return defaultBin
 }
 
 // controlPath names the shared connection's socket. It is hashed rather
@@ -248,12 +357,32 @@ func Handshake(conn net.Conn) (Hello, error) {
 		return Hello{}, err
 	}
 	if hello.Protocol != Protocol {
-		return Hello{}, fmt.Errorf(
-			"it speaks bridge protocol %d, this one speaks %d — stormlight %s "+
-				"there, %s here; upgrade the older side",
-			hello.Protocol, Protocol, hello.Version, localVersion)
+		return Hello{}, &protocolMismatchError{
+			remoteProtocol: hello.Protocol,
+			remoteVersion:  hello.Version,
+			localVersion:   localVersion,
+		}
 	}
 	return hello, nil
+}
+
+type protocolMismatchError struct {
+	remoteProtocol int
+	remoteVersion  string
+	localVersion   string
+}
+
+func (e *protocolMismatchError) Error() string { return e.message("HOST") }
+
+func (e *protocolMismatchError) message(host string) string {
+	action := "upgrade this Stormlight"
+	if CompareProtocol(e.remoteProtocol) == RemoteProtocolOlder {
+		action = fmt.Sprintf("run `stormlight remote setup %s --install`", host)
+	}
+	return fmt.Sprintf(
+		"it speaks bridge protocol %d, this one speaks %d — stormlight %s "+
+			"there, %s here; %s",
+		e.remoteProtocol, Protocol, e.remoteVersion, e.localVersion, action)
 }
 
 // Explain turns ssh's own diagnostics into something with a next step.
@@ -267,7 +396,7 @@ func Explain(host string, message string) string {
 			"%s: its host key is not known yet — run `ssh %s` once to accept it",
 			host, host)
 	}
-	if strings.Contains(message, "Permission denied") {
+	if strings.Contains(message, "Permission denied (") {
 		return fmt.Sprintf(
 			"%s: %s (Stormlight cannot answer a password prompt; it needs key-based login)",
 			host, message)

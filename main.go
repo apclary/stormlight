@@ -127,6 +127,7 @@ func newRootCommand() *cobra.Command {
 		newWindrunnerDaemonCommand(),
 		newWindrunnerAttachCommand(),
 		newWindrunnerBridgeCommand(),
+		newRemoteProtocolCommand(),
 		newResolveCommand(),
 		newReadCommand(),
 		newPickCommand(),
@@ -195,6 +196,17 @@ func newWindrunnerBridgeCommand() *cobra.Command {
 				SocketDir: windrun.SocketDir(),
 				Hostname:  hostname,
 			}, os.Stdin, os.Stdout)
+		},
+	}
+}
+
+func newRemoteProtocolCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:    "_remote-protocol",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintln(cmd.OutOrStdout(), remote.Protocol)
+			return nil
 		},
 	}
 }
@@ -853,7 +865,7 @@ func newListCommand(cfg config.Config) *cobra.Command {
 func newRemoteCommand(cfg config.Config) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "remote",
-		Short: "Inspect and prepare machines Stormlight can reach",
+		Short: "Inspect, prepare, and update machines Stormlight can reach",
 	}
 	command.AddCommand(newRemoteListCommand(cfg), newRemoteSetupCommand(cfg))
 	return command
@@ -885,7 +897,7 @@ func newRemoteSetupCommand(cfg config.Config) *cobra.Command {
 	var wait bool
 	command := &cobra.Command{
 		Use:   "setup <host>",
-		Short: "Report what a machine is missing, and optionally install it",
+		Short: "Report what a machine needs, and optionally install or update it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			host := remoteHostFrom(args[0], cfg.Hosts[args[0]])
@@ -905,7 +917,7 @@ func newRemoteSetupCommand(cfg config.Config) *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&install, "install", false,
-		"install what is missing rather than only reporting it")
+		"install missing tools and update an incompatible stormlight")
 	command.Flags().BoolVar(&withYazi, "yazi", false,
 		"also install yazi, using the host's own package manager")
 	command.Flags().BoolVar(&wait, "wait", false,
@@ -913,8 +925,8 @@ func newRemoteSetupCommand(cfg config.Config) *cobra.Command {
 	return command
 }
 
-// setUpHost reports what a machine has and, when asked, gives it what it
-// is missing.
+// setUpHost reports what a machine has and, when asked, installs missing
+// tools or updates a Stormlight too old to speak this build's contract.
 func setUpHost(
 	ctx context.Context,
 	transport *remote.Transport,
@@ -927,14 +939,32 @@ func setUpHost(
 		return err
 	}
 	writeRemoteReport(out, report)
+	relation := remote.CompareProtocol(report.StormlightProtocol)
+	needsUpgrade := report.Stormlight.Present() &&
+		relation == remote.RemoteProtocolOlder
+	localNeedsUpgrade := relation == remote.RemoteProtocolNewer
+	if needsUpgrade {
+		fmt.Fprintf(out,
+			"\n%s speaks remote protocol %d; this dashboard needs protocol %d.\n",
+			host, report.StormlightProtocol, remote.Protocol)
+	}
+	if localNeedsUpgrade {
+		fmt.Fprintf(out,
+			"\n%s speaks remote protocol %d; this dashboard only speaks protocol %d. "+
+				"Upgrade this dashboard.\n",
+			host, report.StormlightProtocol, remote.Protocol)
+	}
 	if !install {
-		if !report.Ready() || !report.Yazi.Present() {
+		if !report.Ready() || !report.Yazi.Present() || needsUpgrade {
 			fmt.Fprintf(out, "\nRun with --install to fix this.\n")
 		}
 		return nil
 	}
+	if localNeedsUpgrade {
+		return fmt.Errorf("cannot downgrade newer Stormlight on %s; upgrade this dashboard", host)
+	}
 
-	if !report.Stormlight.Present() {
+	if !report.Stormlight.Present() || needsUpgrade {
 		binary, err := selfpath.Resolve()
 		if err != nil {
 			return err

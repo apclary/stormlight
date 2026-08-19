@@ -80,6 +80,7 @@ func TestHandoffsAreOnlyReadableByTheirOwner(t *testing.T) {
 
 func TestChooseRefusesWithoutYazi(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
 	if _, err := Choose("", t.TempDir()); err == nil {
 		t.Fatal("a machine without yazi should say so")
 	}

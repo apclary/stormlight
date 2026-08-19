@@ -16,11 +16,32 @@
 // user. Nothing binds a port.
 package remote
 
-// Protocol is the bridge contract this build speaks. It changes only when
-// the framing around the tunnel changes — a new handshake field that
-// matters, a different splice — never for an ordinary release, so hosts
-// on adjacent versions keep working.
-const Protocol = 1
+// Protocol is the remote contract this build speaks. It changes when the
+// framing around the tunnel changes or when the dashboard begins invoking a
+// new command on the far-side binary. The latter matters just as much: an
+// older binary otherwise accepts the bridge and fails later with an opaque
+// subcommand exit.
+const Protocol = 2
+
+type ProtocolRelation uint8
+
+const (
+	RemoteProtocolOlder ProtocolRelation = iota
+	ProtocolCompatible
+	RemoteProtocolNewer
+)
+
+// CompareProtocol classifies a remote contract against this build's.
+func CompareProtocol(remote int) ProtocolRelation {
+	switch {
+	case remote < Protocol:
+		return RemoteProtocolOlder
+	case remote > Protocol:
+		return RemoteProtocolNewer
+	default:
+		return ProtocolCompatible
+	}
+}
 
 // Hello is the one line a bridge writes before it becomes a byte pipe.
 // It answers the questions dispatch would otherwise have to guess at from

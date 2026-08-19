@@ -2,8 +2,11 @@ package remote
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -27,9 +30,12 @@ func TestSSHArgsCarryTheDashboardsConstraints(t *testing.T) {
 	}
 	// The destination has to precede the remote command, or ssh reads the
 	// command as the destination.
-	destination, command := indexOf(args, "devbox"), indexOf(args, "'stormlight' '_wrbridge'")
+	destination, command := indexOf(args, "devbox"), len(args)-1
 	if destination < 0 || command < 0 || destination > command {
 		t.Fatalf("destination must come before the command: %v", args)
+	}
+	if args[command] != "'stormlight' '_wrbridge'" {
+		t.Fatalf("the default binary should use the direct fast path: %v", args)
 	}
 	if strings.Contains(joined, " -t ") {
 		t.Fatalf("a bridge needs no tty: %v", args)
@@ -64,6 +70,205 @@ func TestSSHArgsRespectTheHost(t *testing.T) {
 	}
 	if port := indexOf(args, "2222"); port < 0 || port > indexOf(args, "trent@10.0.0.4") {
 		t.Fatalf("host options belong ahead of the destination: %v", args)
+	}
+}
+
+func TestDialUsesTheDirectFastPath(t *testing.T) {
+	transport, calls := dialTestTransport(t, `
+case "$last" in
+  *"_wrbridge"*) printf '%s\n' "$hello" ;;
+esac
+`)
+
+	conn, err := transport.Dial()
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	conn.Close()
+
+	got := readCalls(t, calls)
+	if len(got) != 1 || got[0] != "'stormlight' '_wrbridge'" {
+		t.Fatalf("ssh calls = %q", got)
+	}
+}
+
+func TestDialResolvesAndCachesACommandMissingFromTheSSHPath(t *testing.T) {
+	transport, calls := dialTestTransport(t, `
+case "$last" in
+  "'stormlight' '_wrbridge'")
+    echo "sh: stormlight: command not found" >&2
+    exit 127
+    ;;
+  "-s")
+    cat >/dev/null
+    printf '%s\n' "/home/trent/.local/bin/stormlight"
+    ;;
+  "'/home/trent/.local/bin/stormlight' '_wrbridge'")
+    printf '%s\n' "$hello"
+    ;;
+esac
+`)
+
+	for i := 0; i < 2; i++ {
+		conn, err := transport.Dial()
+		if err != nil {
+			t.Fatalf("Dial %d: %v", i+1, err)
+		}
+		conn.Close()
+	}
+
+	got := readCalls(t, calls)
+	want := []string{
+		"'stormlight' '_wrbridge'",
+		"-s",
+		"'/home/trent/.local/bin/stormlight' '_wrbridge'",
+		"'/home/trent/.local/bin/stormlight' '_wrbridge'",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ssh calls = %q, want %q", got, want)
+	}
+}
+
+func TestConcurrentDialsShareOnePathLookup(t *testing.T) {
+	transport, calls := dialTestTransport(t, `
+case "$last" in
+  "'stormlight' '_wrbridge'")
+    exit 127
+    ;;
+  "-s")
+    cat >/dev/null
+    printf '%s\n' "/home/trent/.local/bin/stormlight"
+    ;;
+  "'/home/trent/.local/bin/stormlight' '_wrbridge'")
+    printf '%s\n' "$hello"
+    ;;
+esac
+`)
+
+	const dials = 8
+	errors := make(chan error, dials)
+	for i := 0; i < dials; i++ {
+		go func() {
+			conn, err := transport.Dial()
+			if conn != nil {
+				conn.Close()
+			}
+			errors <- err
+		}()
+	}
+	for i := 0; i < dials; i++ {
+		if err := <-errors; err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+	}
+
+	lookups := 0
+	for _, call := range readCalls(t, calls) {
+		if call == "-s" {
+			lookups++
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("login-path lookups = %d, want 1", lookups)
+	}
+}
+
+func TestDialReplacesAStaleCachedPath(t *testing.T) {
+	transport, calls := dialTestTransport(t, `
+case "$last" in
+  "'/old/stormlight' '_wrbridge'")
+    exit 127
+    ;;
+  "-s")
+    cat >/dev/null
+    printf '%s\n' "/home/trent/.local/bin/stormlight"
+    ;;
+  "'/home/trent/.local/bin/stormlight' '_wrbridge'")
+    printf '%s\n' "$hello"
+    ;;
+esac
+`)
+	transport.resolvedBin = "/old/stormlight"
+
+	conn, err := transport.Dial()
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	conn.Close()
+
+	got := readCalls(t, calls)
+	want := []string{
+		"'/old/stormlight' '_wrbridge'",
+		"-s",
+		"'/home/trent/.local/bin/stormlight' '_wrbridge'",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ssh calls = %q, want %q", got, want)
+	}
+}
+
+func TestDialDoesNotRetryAnUnrelatedFailure(t *testing.T) {
+	transport, calls := dialTestTransport(t, `
+echo "Permission denied (publickey)." >&2
+exit 255
+`)
+
+	if _, err := transport.Dial(); err == nil {
+		t.Fatal("Dial should fail")
+	}
+	if got := readCalls(t, calls); len(got) != 1 {
+		t.Fatalf("ssh calls = %q", got)
+	}
+}
+
+func TestDialDoesNotReplaceAnExplicitBinary(t *testing.T) {
+	transport, calls := dialTestTransport(t, `
+echo "sh: /configured/stormlight: not found" >&2
+exit 127
+`)
+	transport.host.Bin = "/configured/stormlight"
+
+	_, err := transport.Dial()
+	if err == nil || !strings.Contains(err.Error(), "/configured/stormlight") {
+		t.Fatalf("Dial error = %v", err)
+	}
+	if got := readCalls(t, calls); len(got) != 1 {
+		t.Fatalf("ssh calls = %q", got)
+	}
+}
+
+func TestDialExplainsAnExplicitBinaryThatCannotExecute(t *testing.T) {
+	transport, calls := dialTestTransport(t, `
+echo "sh: /configured/stormlight: Permission denied" >&2
+exit 126
+`)
+	transport.host.Bin = "/configured/stormlight"
+
+	_, err := transport.Dial()
+	if err == nil || !strings.Contains(err.Error(), "[hosts.devbox].bin") {
+		t.Fatalf("Dial error = %v", err)
+	}
+	if got := readCalls(t, calls); len(got) != 1 {
+		t.Fatalf("ssh calls = %q", got)
+	}
+}
+
+func TestDialNamesTheHostInAProtocolUpgradeCommand(t *testing.T) {
+	older, err := json.Marshal(Hello{Protocol: Protocol - 1, Version: "v0.10.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, _ := dialTestTransport(t, fmt.Sprintf(`
+hello=%s
+printf '%%s\n' "$hello"
+`, shellQuote([]string{string(older)})))
+
+	_, err = transport.Dial()
+	if err == nil || !strings.Contains(err.Error(), "remote setup devbox --install") {
+		t.Fatalf("Dial error = %v", err)
+	}
+	if strings.Contains(err.Error(), "remote setup HOST") {
+		t.Fatalf("Dial should replace the placeholder: %v", err)
 	}
 }
 
@@ -137,11 +342,27 @@ func TestHandshakeLeavesTheProtocolAlone(t *testing.T) {
 	}
 }
 
+func TestProtocolComparison(t *testing.T) {
+	for _, test := range []struct {
+		protocol int
+		want     ProtocolRelation
+	}{
+		{0, RemoteProtocolOlder},
+		{Protocol - 1, RemoteProtocolOlder},
+		{Protocol, ProtocolCompatible},
+		{Protocol + 1, RemoteProtocolNewer},
+	} {
+		if got := CompareProtocol(test.protocol); got != test.want {
+			t.Fatalf("CompareProtocol(%d) = %v, want %v", test.protocol, got, test.want)
+		}
+	}
+}
+
 func TestHandshakeRefusesAnotherProtocol(t *testing.T) {
 	near, far := net.Pipe()
 	defer near.Close()
 	go func() {
-		encoded, _ := json.Marshal(Hello{Protocol: Protocol + 1, Version: "v9.9.9"})
+		encoded, _ := json.Marshal(Hello{Protocol: Protocol - 1, Version: "v0.10.0"})
 		far.Write(append(encoded, '\n'))
 	}()
 
@@ -151,10 +372,30 @@ func TestHandshakeRefusesAnotherProtocol(t *testing.T) {
 	}
 	// The message has to name both sides: the whole failure is that two
 	// machines disagree, and only one of them is in front of the user.
-	for _, want := range []string{"v9.9.9", localVersion} {
+	for _, want := range []string{"v0.10.0", localVersion} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error should name both versions, got: %v", err)
 		}
+	}
+	if !strings.Contains(err.Error(), "remote setup HOST --install") {
+		t.Fatalf("error should say how to upgrade the remote: %v", err)
+	}
+}
+
+func TestHandshakeDoesNotSuggestDowngradingANewerRemote(t *testing.T) {
+	near, far := net.Pipe()
+	defer near.Close()
+	go func() {
+		encoded, _ := json.Marshal(Hello{Protocol: Protocol + 1, Version: "v9.9.9"})
+		far.Write(append(encoded, '\n'))
+	}()
+
+	_, err := Handshake(near)
+	if err == nil || !strings.Contains(err.Error(), "upgrade this Stormlight") {
+		t.Fatalf("error should direct the local upgrade, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "remote setup") {
+		t.Fatalf("error should not downgrade the remote: %v", err)
 	}
 }
 
@@ -195,4 +436,42 @@ func readFull(conn net.Conn, buffer []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+func dialTestTransport(t *testing.T, behavior string) (*Transport, string) {
+	t.Helper()
+	directory := t.TempDir()
+	calls := filepath.Join(directory, "calls")
+	program := filepath.Join(directory, "ssh")
+	hello, err := json.Marshal(Hello{
+		Protocol: Protocol,
+		Version:  "v9.9.9",
+		Bin:      "/home/trent/.local/bin/stormlight",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+for last do :; done
+printf '%%s\n' "$last" >>%s
+hello=%s
+%s
+`, shellQuote([]string{calls}), shellQuote([]string{string(hello)}), behavior)
+	if err := os.WriteFile(program, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return NewTransport(Host{
+		Name:        "devbox",
+		SSHProgram:  program,
+		NoMultiplex: true,
+	}), calls
+}
+
+func readCalls(t *testing.T, path string) []string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(content)), "\n")
 }

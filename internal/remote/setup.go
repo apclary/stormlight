@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -44,6 +45,9 @@ type Report struct {
 	// Musl says the host links against musl rather than glibc, which is
 	// a different binary rather than a slower one.
 	Musl bool
+	// StormlightProtocol is the remote command contract. Zero means the
+	// installed Stormlight predates the command that reports it.
+	StormlightProtocol int
 }
 
 // Ready reports whether the host can host agents at all.
@@ -83,6 +87,7 @@ fi
 runs "$sl" || sl=""
 [ -n "$sl" ] && printf 'stormlight=%s\n' "$sl"
 [ -n "$sl" ] && printf 'stormlight_version=%s\n' "$("$sl" --version 2>/dev/null | head -1)"
+[ -n "$sl" ] && printf 'stormlight_protocol=%s\n' "$("$sl" _remote-protocol 2>/dev/null)"
 yz=$(look yazi)
 # Beside Stormlight, which is where setup puts it and is regularly on no
 # PATH at all — without this, a machine reports yazi missing immediately
@@ -139,6 +144,8 @@ func Probe(ctx context.Context, transport *Transport) (Report, error) {
 			report.Stormlight.Path = value
 		case "stormlight_version":
 			report.Stormlight.Version = value
+		case "stormlight_protocol":
+			report.StormlightProtocol, _ = strconv.Atoi(value)
 		case "yazi":
 			report.Yazi.Path = value
 		case "package_manager":

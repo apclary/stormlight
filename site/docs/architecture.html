@@ -247,15 +247,26 @@
     scripts go to <code>/bin/sh</code> on stdin — unquoted, unparsed by anything else. Every
     ssh call is bounded by a connect timeout, and a host that fails to answer is left alone
     for a while rather than dialled again on the next refresh.</p>
+    <p>The common path remains <code>ssh &lt;host&gt; stormlight ...</code>, with no login
+    shell or discovery round trip. If that command exits 127, Stormlight asks the remote
+    login shell for the absolute binary path and retries once. The answer is cached, then
+    replaced by the path the bridge reports in its greeting, so subsequent connections invoke
+    the binary directly. A configured <code>hosts.&lt;name&gt;.bin</code> is authoritative:
+    if it fails, Stormlight names that setting rather than silently running a different
+    binary.</p>
     <p><code>stormlight remote setup &lt;host&gt;</code> reports what a machine is missing
-    and can install it. Stormlight itself is copied from this machine when the platforms
-    match — the same build, so the two ends cannot disagree about the protocol between them —
-    and otherwise fetched as that platform's published archive, checked against the release's
-    own checksums here rather than there: the machine being prepared is precisely the one
-    with no Stormlight to check anything with. A development build has no published archive
-    and says so instead of guessing at a version. The installed path is recorded as that
+    or whether its Stormlight is incompatible, and can install or update it. Stormlight
+    itself is copied from this machine when the platforms match — the same build, so the two
+    ends cannot disagree about the protocol between them — and otherwise fetched as that
+    platform's published archive, checked against the release's own checksums here rather
+    than there: the machine being prepared is precisely the one with no Stormlight to check
+    anything with. A development build has no published archive and says so instead of
+    guessing at a version. The installed path is recorded as that
     host's <code>bin</code>, because a non-interactive SSH shell frequently has no
-    <code>~/.local/bin</code> on its PATH and would not find what was just put there. Yazi comes
+    <code>~/.local/bin</code> on its PATH and would not find what was just put there.
+    Compatibility follows the bridge protocol reported by the remote binary, not release-number
+    ordering. An older or pre-probe remote is upgraded; a newer remote directs the user to
+    upgrade the local dashboard and is never downgraded. Yazi comes
     from its own published build for that platform, put beside Stormlight in the same
     directory — not through the host's package manager, which is absent from some
     distributions' repositories entirely and wants a password a popup is a poor place to ask
