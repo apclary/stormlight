@@ -103,12 +103,16 @@ func setCodexSessionName(
 		return err
 	}
 	waited := false
-	defer func() {
-		if !waited {
-			_ = command.Process.Kill()
-			_ = command.Wait()
+	stop := func() {
+		if waited {
+			return
 		}
-	}()
+		_ = stdin.Close()
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		waited = true
+	}
+	defer stop()
 
 	encoder := json.NewEncoder(stdin)
 	decoder := json.NewDecoder(bufio.NewReader(stdout))
@@ -126,6 +130,7 @@ func setCodexSessionName(
 		return err
 	}
 	if err := readRPCResponse(decoder, 1); err != nil {
+		stop()
 		return withCommandError(err, stderr.String())
 	}
 	if err := encoder.Encode(map[string]any{
@@ -144,15 +149,13 @@ func setCodexSessionName(
 		return err
 	}
 	if err := readRPCResponse(decoder, 2); err != nil {
+		stop()
 		return withCommandError(err, stderr.String())
 	}
 	// app-server is a service, not a one-shot command: after initialization
 	// it can remain alive even when stdin closes. The successful response is
 	// the transaction boundary, so terminate the helper and reap it here.
-	_ = stdin.Close()
-	_ = command.Process.Kill()
-	_ = command.Wait()
-	waited = true
+	stop()
 	return nil
 }
 
