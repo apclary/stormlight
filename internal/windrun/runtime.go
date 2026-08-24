@@ -450,6 +450,24 @@ func (r *Runtime) Attach(ctx context.Context, id string) (session.AttachResult, 
 }
 
 func (r *Runtime) Send(ctx context.Context, id, message string) error {
+	if err := r.sendInput(id, message); err != nil {
+		return err
+	}
+	return r.Update(ctx, id, session.Update{Activity: agent.ActivityWorking})
+}
+
+// SendCommand types a provider-native slash command without claiming that a
+// model turn started. Codex processes /rename inside the live TUI, which is
+// the only path that updates both its persisted index and its exit hint.
+func (r *Runtime) SendCommand(_ context.Context, id, command string) error {
+	command = strings.TrimSpace(command)
+	if !strings.HasPrefix(command, "/") || strings.Contains(command, "\n") {
+		return fmt.Errorf("provider command must be a single-line slash command")
+	}
+	return r.sendInput(id, command)
+}
+
+func (r *Runtime) sendInput(id, message string) error {
 	sessionID, err := r.sessionIDFor(id)
 	if err != nil {
 		return err
@@ -472,7 +490,7 @@ func (r *Runtime) Send(ctx context.Context, id, message string) error {
 	if err := r.client.Input(sessionID, []byte("\r")); err != nil {
 		return err
 	}
-	return r.Update(ctx, id, session.Update{Activity: agent.ActivityWorking})
+	return nil
 }
 
 func (r *Runtime) Interrupt(ctx context.Context, id string) error {

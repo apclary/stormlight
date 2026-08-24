@@ -189,10 +189,12 @@ func (s *Service) ListAgents(ctx context.Context) ([]agent.Agent, error) {
 
 func (s *Service) Dispatch(ctx context.Context, req DispatchRequest) (agent.Agent, error) {
 	req.Task = strings.TrimSpace(req.Task)
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Mode == "" {
 		req.Mode = agent.DefaultMode
 	}
-	launch, err := s.providers.Resolve(req.Provider, req.Task, req.Mode)
+	launch, err := s.providers.ResolveNamed(
+		req.Provider, req.Task, req.Name, req.Mode)
 	if err != nil {
 		return agent.Agent{}, err
 	}
@@ -238,7 +240,8 @@ func (s *Service) Resume(
 	if mode == "" {
 		mode = agent.DefaultMode
 	}
-	launch, err := s.providers.Resume(record.Provider, record.SessionID, mode)
+	launch, err := s.providers.ResumeNamed(
+		record.Provider, record.SessionID, record.Name, mode)
 	if err != nil {
 		return agent.Agent{}, err
 	}
@@ -481,7 +484,36 @@ func (s *Service) RenameWorkspace(
 }
 
 func (s *Service) Rename(ctx context.Context, id, name string) error {
-	return s.runtime.Rename(ctx, id, name)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("agent name cannot be empty")
+	}
+	if err := s.runtime.Rename(ctx, id, name); err != nil {
+		return err
+	}
+	// A remote agent is synchronized by its next provider hook, which runs
+	// beside that provider and therefore has the right binary and state.
+	managedAgent, err := s.find(ctx, id)
+	if err != nil {
+		diagnostic.Logger().Warn("renamed agent could not be listed for session sync",
+			"agent_id", id,
+			"error", err,
+		)
+		return nil
+	}
+	if managedAgent.Host != "" {
+		return nil
+	}
+	if err := s.SyncSessionName(ctx, id); err != nil {
+		// Stormlight's name is authoritative for its own UI. A provider
+		// index failure is retried by the next lifecycle event rather than
+		// turning a completed rename into a misleading failed action.
+		diagnostic.Logger().Warn("provider session name sync failed",
+			"agent_id", id,
+			"error", err,
+		)
+	}
+	return nil
 }
 
 func (s *Service) Capture(ctx context.Context, id string, lines int) (string, error) {
@@ -701,6 +733,53 @@ func (s *Service) Update(ctx context.Context, id string, update session.Update) 
 	}
 	s.recordHistory(ctx, id)
 	return nil
+}
+
+// SyncSessionName copies an explicit Stormlight name into the provider's own
+// session index. It is called from provider hooks so the operation runs on
+// the same machine as remote providers and their state.
+func (s *Service) SyncSessionName(ctx context.Context, id string) error {
+	managedAgent, err := s.find(ctx, id)
+	if err != nil {
+		return err
+	}
+	name := strings.TrimSpace(managedAgent.Name)
+	if name == "" || managedAgent.SessionID == "" ||
+		managedAgent.SessionName == name {
+		return nil
+	}
+	command, supported, err := s.providers.SessionNameCommand(
+		managedAgent.Provider,
+		name,
+	)
+	if err != nil {
+		return err
+	}
+	if managedAgent.ProcessLive && supported {
+		if sender, ok := s.runtime.(session.CommandSender); ok {
+			if err := sender.SendCommand(ctx, id, command); err != nil {
+				return err
+			}
+			return s.runtime.Update(
+				ctx,
+				id,
+				session.Update{SessionName: name},
+			)
+		}
+	}
+	supported, err = s.providers.SetSessionName(
+		ctx,
+		managedAgent.Provider,
+		managedAgent.SessionID,
+		name,
+	)
+	if err != nil {
+		return err
+	}
+	if !supported {
+		return nil
+	}
+	return s.runtime.Update(ctx, id, session.Update{SessionName: name})
 }
 
 // recordHistory mirrors the agent's current state into the session history

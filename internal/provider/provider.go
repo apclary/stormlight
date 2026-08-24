@@ -30,6 +30,7 @@ type Adapter interface {
 	ID() agent.Provider
 	Label() string
 	Resolve(prompt string, mode agent.PermissionMode) (Launch, error)
+	ResolveNamed(prompt, name string, mode agent.PermissionMode) (Launch, error)
 	// Binary is the program this provider runs, as a name to look up
 	// rather than a path some machine already resolved. It is what a
 	// host is asked about when the question is whether that machine can
@@ -41,6 +42,7 @@ type Adapter interface {
 	// is a fact about that provider rather than about the code.
 	CanResume() bool
 	Resume(sessionID string, mode agent.PermissionMode) (Launch, error)
+	ResumeNamed(sessionID, name string, mode agent.PermissionMode) (Launch, error)
 	// SessionFromTranscript reads the provider's conversation id out of a
 	// transcript path. The recorded session id is the primary handle —
 	// both providers report it on every lifecycle event — but a record
@@ -64,6 +66,10 @@ type commandAdapter struct {
 	// conversation, not how to reopen one. Like argsFor it keeps the
 	// variable argument last, so extra args slot in the same way for both.
 	resumeFor func(sessionID string, mode agent.PermissionMode) ([]string, error)
+	// nameFor returns provider arguments that apply a human-facing name to
+	// the session. Providers without a launch-time naming surface leave it
+	// nil and may synchronize later through SetSessionName.
+	nameFor func(name string) []string
 	// sessionFor reads the provider's conversation id out of a transcript
 	// path; an empty result means this path names nothing resumable.
 	sessionFor func(transcriptPath string) string
@@ -82,7 +88,15 @@ func (a commandAdapter) Label() string {
 }
 
 func (a commandAdapter) Resolve(prompt string, mode agent.PermissionMode) (Launch, error) {
-	return a.launch(a.argsFor, prompt, mode)
+	return a.ResolveNamed(prompt, "", mode)
+}
+
+func (a commandAdapter) ResolveNamed(
+	prompt string,
+	name string,
+	mode agent.PermissionMode,
+) (Launch, error) {
+	return a.launch(a.argsFor, prompt, name, mode)
 }
 
 func (a commandAdapter) CanResume() bool {
@@ -93,10 +107,18 @@ func (a commandAdapter) Resume(
 	sessionID string,
 	mode agent.PermissionMode,
 ) (Launch, error) {
+	return a.ResumeNamed(sessionID, "", mode)
+}
+
+func (a commandAdapter) ResumeNamed(
+	sessionID string,
+	name string,
+	mode agent.PermissionMode,
+) (Launch, error) {
 	if !a.CanResume() {
 		return Launch{}, fmt.Errorf("%s cannot resume a conversation", a.label)
 	}
-	return a.launch(a.resumeFor, sessionID, mode)
+	return a.launch(a.resumeFor, sessionID, name, mode)
 }
 
 func (a commandAdapter) SessionFromTranscript(transcriptPath string) string {
@@ -109,6 +131,7 @@ func (a commandAdapter) SessionFromTranscript(transcriptPath string) string {
 func (a commandAdapter) launch(
 	build func(string, agent.PermissionMode) ([]string, error),
 	value string,
+	name string,
 	mode agent.PermissionMode,
 ) (Launch, error) {
 	path, err := exec.LookPath(a.binary)
@@ -119,7 +142,24 @@ func (a commandAdapter) launch(
 	if err != nil {
 		return Launch{}, err
 	}
+	args = a.withName(args, name)
 	return Launch{Path: path, Program: a.binary, Args: a.withExtra(args)}, nil
+}
+
+// withName slots launch-time naming flags before the prompt or resume id.
+// The final argument is deliberately kept final for the same reason as
+// withExtra: it is the one variable value both launch forms share.
+func (a commandAdapter) withName(args []string, name string) []string {
+	if a.nameFor == nil || len(args) == 0 {
+		return args
+	}
+	nameArgs := a.nameFor(name)
+	if len(nameArgs) == 0 {
+		return args
+	}
+	combined := slices.Clone(args[:len(args)-1])
+	combined = append(combined, nameArgs...)
+	return append(combined, args[len(args)-1])
 }
 
 // withExtra slots the user's extra args in just before the final argument.
@@ -177,6 +217,7 @@ func NewRegistryWithSpecs(specs []Spec) *Registry {
 			binary:     "claude",
 			argsFor:    claudeArgs,
 			resumeFor:  claudeResumeArgs,
+			nameFor:    claudeNameArgs,
 			sessionFor: claudeSessionID,
 		},
 	}
@@ -252,6 +293,17 @@ func (r *Registry) Resolve(
 	prompt string,
 	mode agent.PermissionMode,
 ) (Launch, error) {
+	return r.ResolveNamed(id, prompt, "", mode)
+}
+
+// ResolveNamed builds a fresh launch and applies a provider-native session
+// name when the provider exposes one at startup.
+func (r *Registry) ResolveNamed(
+	id agent.Provider,
+	prompt string,
+	name string,
+	mode agent.PermissionMode,
+) (Launch, error) {
 	adapter, ok := r.adapters[id]
 	if !ok {
 		return Launch{}, fmt.Errorf("unsupported provider %q", id)
@@ -262,13 +314,24 @@ func (r *Registry) Resolve(
 	if mode == "" {
 		mode = agent.DefaultMode
 	}
-	return adapter.Resolve(prompt, mode)
+	return adapter.ResolveNamed(prompt, name, mode)
 }
 
 // Resume builds the launch that reopens a provider's recorded session.
 func (r *Registry) Resume(
 	id agent.Provider,
 	sessionID string,
+	mode agent.PermissionMode,
+) (Launch, error) {
+	return r.ResumeNamed(id, sessionID, "", mode)
+}
+
+// ResumeNamed reopens a provider session and reapplies its stored name when
+// the provider accepts names on resumed launches.
+func (r *Registry) ResumeNamed(
+	id agent.Provider,
+	sessionID string,
+	name string,
 	mode agent.PermissionMode,
 ) (Launch, error) {
 	adapter, ok := r.adapters[id]
@@ -287,7 +350,7 @@ func (r *Registry) Resume(
 	if mode == "" {
 		mode = agent.DefaultMode
 	}
-	return adapter.Resume(sessionID, mode)
+	return adapter.ResumeNamed(sessionID, name, mode)
 }
 
 // SessionID resolves the conversation id a record holds: the recorded id
@@ -519,6 +582,14 @@ func claudeArgs(prompt string, mode agent.PermissionMode) ([]string, error) {
 		return nil, err
 	}
 	return append(args, prompt), nil
+}
+
+func claudeNameArgs(name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	return []string{"--name", name}
 }
 
 func claudeLifecycleArgs(mode agent.PermissionMode) ([]string, error) {

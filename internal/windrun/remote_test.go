@@ -330,7 +330,12 @@ func TestRemoteRosterAndTerminalCrossTheBridge(t *testing.T) {
 		Cwd:      t.TempDir(),
 		Launch: session.Launch{
 			Path: "/bin/sh",
-			Args: []string{"-c", `printf 'ready\n'; read line; printf 'heard:%s\n' "$line"; sleep 60`},
+			Args: []string{"-c", `printf 'ready\n'
+read line
+printf 'heard:%s\n' "$line"
+read command
+printf 'command:%s\n' "$command"
+sleep 60`},
 		},
 	})
 	if err != nil {
@@ -355,6 +360,29 @@ func TestRemoteRosterAndTerminalCrossTheBridge(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	waitForScreen(t, runtime, dispatched.ID, "heard:over the bridge")
+
+	if err := runtime.Update(
+		context.Background(),
+		dispatched.ID,
+		session.Update{Activity: agent.ActivityIdle},
+	); err != nil {
+		t.Fatalf("set idle: %v", err)
+	}
+	if err := runtime.SendCommand(
+		context.Background(),
+		dispatched.ID,
+		"/rename listener",
+	); err != nil {
+		t.Fatalf("SendCommand: %v", err)
+	}
+	waitForScreen(t, runtime, dispatched.ID, "command:/rename listener")
+	agents, err = runtime.ListAgents(context.Background())
+	if err != nil {
+		t.Fatalf("ListAgents after command: %v", err)
+	}
+	if agents[0].Activity != agent.ActivityIdle {
+		t.Fatalf("control command changed activity: %+v", agents[0])
+	}
 
 	// An attachment is its own connection through the tunnel, and its
 	// seed is the exact state rather than a re-render.

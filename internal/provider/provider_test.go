@@ -226,6 +226,69 @@ func TestBuiltinSpecOverridesBinaryAndAppendsExtraArgs(t *testing.T) {
 	}
 }
 
+func TestClaudeNamedLaunchesNameFreshAndResumedSessions(t *testing.T) {
+	registry := NewRegistryWithSpecs([]Spec{{
+		ID:     agent.ProviderClaude,
+		Binary: "echo",
+	}})
+
+	fresh, err := registry.ResolveNamed(
+		agent.ProviderClaude,
+		"do work",
+		"focused fixer",
+		agent.ModeAsk,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(
+		fresh.Args[len(fresh.Args)-3:],
+		[]string{"--name", "focused fixer", "do work"},
+	) {
+		t.Fatalf("named Claude launch = %#v", fresh.Args)
+	}
+
+	resumed, err := registry.ResumeNamed(
+		agent.ProviderClaude,
+		"5f2b8c14-0000-4000-8000-000000000001",
+		"focused fixer",
+		agent.ModeAsk,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(
+		resumed.Args[len(resumed.Args)-3:],
+		[]string{
+			"--name",
+			"focused fixer",
+			"--resume=5f2b8c14-0000-4000-8000-000000000001",
+		},
+	) {
+		t.Fatalf("named Claude resume = %#v", resumed.Args)
+	}
+}
+
+func TestProvidersWithoutLaunchNamingKeepTheirArguments(t *testing.T) {
+	registry := NewRegistryWithSpecs([]Spec{{
+		ID:     agent.ProviderCodex,
+		Binary: "echo",
+	}})
+	unnamed, err := registry.Resolve(
+		agent.ProviderCodex, "do work", agent.ModeAsk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	named, err := registry.ResolveNamed(
+		agent.ProviderCodex, "do work", "focused fixer", agent.ModeAsk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(named.Args, unnamed.Args) {
+		t.Fatalf("Codex was given unsupported launch args: %#v", named.Args)
+	}
+}
+
 // Resume launches must carry the same lifecycle wiring a fresh dispatch
 // gets — a resumed agent that reports nothing would sit on the dashboard
 // exactly like the broken-hooks failure mode the wiring exists to prevent.

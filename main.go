@@ -1580,6 +1580,14 @@ func newProviderEventCommand(cfg config.Config) *cobra.Command {
 					"agent", id,
 					"error", err,
 				)
+				return nil
+			}
+			if err := service.SyncSessionName(ctx, id); err != nil {
+				diagnostic.Logger().Warn("sync provider session name",
+					"provider", providerID,
+					"agent", id,
+					"error", err,
+				)
 			}
 			return nil
 		},
