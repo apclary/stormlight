@@ -23,6 +23,13 @@ type Runtime interface {
 	SetWorkspace(context.Context, string, workspace.Context) error
 }
 
+// CommandSender is an optional runtime capability for provider-native control
+// commands. Unlike Send, a control command does not represent a model turn and
+// must not change the agent's activity.
+type CommandSender interface {
+	SendCommand(context.Context, string, string) error
+}
+
 // TerminalStreamer is an optional runtime capability: a runtime whose
 // terminals can be attached to directly — an exact state snapshot followed
 // by the live byte stream, with input and resize flowing back.
@@ -135,6 +142,9 @@ type Update struct {
 	// SessionID records the provider's own conversation id when an event
 	// carries it; empty means "leave as is".
 	SessionID string
+	// SessionName records a provider-side name write; empty means "leave as
+	// is". It is separate from Name, Stormlight's desired display name.
+	SessionName string
 	// TranscriptPath records the provider's own transcript file when a
 	// hook reports it; empty means "leave as is".
 	TranscriptPath string

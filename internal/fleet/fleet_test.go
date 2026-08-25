@@ -20,6 +20,7 @@ type stub struct {
 	agents    []agent.Agent
 	listErr   error
 	sent      []string
+	commands  []string
 	deleted   []string
 	launched  []session.DispatchRequest
 	lists     int
@@ -50,6 +51,13 @@ func (s *stub) Send(_ context.Context, id, message string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sent = append(s.sent, id+":"+message)
+	return nil
+}
+
+func (s *stub) SendCommand(_ context.Context, id, command string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commands = append(s.commands, id+":"+command)
 	return nil
 }
 
@@ -165,6 +173,17 @@ func TestOperationsFollowTheAgentToItsHost(t *testing.T) {
 	}
 	if len(devbox.sent) != 1 || len(local.sent) != 0 {
 		t.Fatalf("message went to the wrong machine: local=%v devbox=%v", local.sent, devbox.sent)
+	}
+	if err := f.SendCommand(
+		context.Background(),
+		"bbb",
+		"/rename remote-agent",
+	); err != nil {
+		t.Fatalf("SendCommand: %v", err)
+	}
+	if len(devbox.commands) != 1 || len(local.commands) != 0 {
+		t.Fatalf("command went to the wrong machine: local=%v devbox=%v",
+			local.commands, devbox.commands)
 	}
 	if err := f.Delete(context.Background(), "aaa"); err != nil {
 		t.Fatalf("Delete: %v", err)

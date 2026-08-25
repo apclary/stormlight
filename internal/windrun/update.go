@@ -28,6 +28,9 @@ func applyUpdate(managedAgent agent.Agent, update session.Update) agent.Agent {
 	if update.SessionID != "" {
 		managedAgent.SessionID = update.SessionID
 	}
+	if update.SessionName != "" {
+		managedAgent.SessionName = update.SessionName
+	}
 	if update.TranscriptPath != "" {
 		managedAgent.TranscriptPath = update.TranscriptPath
 	}

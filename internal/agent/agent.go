@@ -184,6 +184,10 @@ type Agent struct {
 	// `claude --resume` and `codex resume` take — reported by its hooks and
 	// notify surface. It is what lets a conversation outlive its window.
 	SessionID string `json:"session_id,omitempty"`
+	// SessionName is the last Stormlight name successfully written into the
+	// provider's own session index. It prevents every lifecycle hook from
+	// repeating the same provider-side write.
+	SessionName string `json:"session_name,omitempty"`
 	// TranscriptPath is the provider's own transcript file for this
 	// conversation (Claude Code session JSONL), reported by its hooks.
 	TranscriptPath string            `json:"transcript_path,omitempty"`

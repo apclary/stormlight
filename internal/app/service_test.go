@@ -19,6 +19,8 @@ type recordingRuntime struct {
 	session.Runtime
 	agents      []agent.Agent
 	workspaceID string
+	updates     []session.Update
+	commands    []string
 }
 
 type rootsResolver struct {
@@ -46,10 +48,28 @@ func (r rootsResolver) ExecutionRoots(
 }
 
 func (r *recordingRuntime) Update(
-	context.Context,
-	string,
-	session.Update,
+	_ context.Context,
+	id string,
+	update session.Update,
 ) error {
+	r.updates = append(r.updates, update)
+	for index := range r.agents {
+		if r.agents[index].ID != id {
+			continue
+		}
+		if update.SessionName != "" {
+			r.agents[index].SessionName = update.SessionName
+		}
+	}
+	return nil
+}
+
+func (r *recordingRuntime) SendCommand(
+	_ context.Context,
+	id string,
+	command string,
+) error {
+	r.commands = append(r.commands, id+":"+command)
 	return nil
 }
 
@@ -153,6 +173,90 @@ func TestUpdateRecordsSessionHistory(t *testing.T) {
 	}
 	if len(past) != 1 || past[0].SessionID != records[0].SessionID {
 		t.Fatalf("past = %#v", past)
+	}
+}
+
+func TestSessionNameSyncUsesLiveCodexCommand(t *testing.T) {
+	current := &recordingRuntime{
+		agents: []agent.Agent{{
+			ID:          "agent-one",
+			Provider:    agent.ProviderCodex,
+			Name:        "focused fixer",
+			SessionID:   "3308ff3d-2cbc-47ab-81b1-a8fa28940a14",
+			ProcessLive: true,
+		}},
+	}
+	registry := provider.NewRegistryWithSpecs([]provider.Spec{{
+		ID:     agent.ProviderCodex,
+		Binary: filepath.Join(t.TempDir(), "missing-codex"),
+	}})
+	service := NewService(current, registry, workspace.NewRegistry())
+
+	if err := service.SyncSessionName(context.Background(), "agent-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SyncSessionName(context.Background(), "agent-one"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(
+		current.commands,
+		[]string{"agent-one:/rename focused fixer"},
+	) {
+		t.Fatalf("commands = %#v", current.commands)
+	}
+	if current.agents[0].SessionName != "focused fixer" ||
+		len(current.updates) != 1 {
+		t.Fatalf("agent = %#v, updates = %#v", current.agents[0], current.updates)
+	}
+}
+
+func TestCompletedSessionNameSyncWritesCodexOnce(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "calls")
+	binary := filepath.Join(t.TempDir(), "codex")
+	script := `#!/bin/sh
+set -eu
+IFS= read -r initialize
+printf '{"id":1,"result":{}}\n'
+IFS= read -r initialized
+IFS= read -r rename
+printf 'called\n' >> "$CAPTURE"
+printf '{"id":2,"result":{}}\n'
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CAPTURE", capture)
+	current := &recordingRuntime{
+		agents: []agent.Agent{{
+			ID:        "agent-one",
+			Provider:  agent.ProviderCodex,
+			Name:      "focused fixer",
+			SessionID: "3308ff3d-2cbc-47ab-81b1-a8fa28940a14",
+		}},
+	}
+	registry := provider.NewRegistryWithSpecs([]provider.Spec{{
+		ID:     agent.ProviderCodex,
+		Binary: binary,
+	}})
+	service := NewService(current, registry, workspace.NewRegistry())
+
+	if err := service.SyncSessionName(context.Background(), "agent-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SyncSessionName(context.Background(), "agent-one"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(calls) != "called\n" {
+		t.Fatalf("provider calls = %q", calls)
+	}
+	if current.agents[0].SessionName != "focused fixer" ||
+		len(current.updates) != 1 {
+		t.Fatalf("agent = %#v, updates = %#v", current.agents[0], current.updates)
 	}
 }
 

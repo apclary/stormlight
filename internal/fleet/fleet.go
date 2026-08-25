@@ -362,6 +362,18 @@ func (f *Runtime) Send(ctx context.Context, id, message string) error {
 	return runtime.Send(ctx, id, message)
 }
 
+func (f *Runtime) SendCommand(ctx context.Context, id, command string) error {
+	runtime, err := f.memberFor(ctx, id)
+	if err != nil {
+		return err
+	}
+	sender, ok := runtime.(session.CommandSender)
+	if !ok {
+		return fmt.Errorf("runtime cannot send provider commands")
+	}
+	return sender.SendCommand(ctx, id, command)
+}
+
 func (f *Runtime) Interrupt(ctx context.Context, id string) error {
 	runtime, err := f.memberFor(ctx, id)
 	if err != nil {

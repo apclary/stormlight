@@ -172,10 +172,13 @@ inventory to dispatch one peer per checkout. The dashboard polls the same
 workspace catalog, root inventory, and managed-agent roster, so all changes
 appear without a restart.
 
-Agent renames set the stored name, which the dashboard prefers over the
-generated task title. Workspace renames (press `R` in the Workspaces pane)
-are display-name overrides stored in the workspace catalog; the directory on
-disk is untouched.
+Explicit agent names are also applied to the provider's saved session: Claude
+accepts the name when a session starts or resumes, and a running Codex session
+receives its native `/rename` command once the session ID arrives. Completed
+Codex sessions are renamed through its app-server API. Later Codex renames sync
+immediately for local agents and on the next provider event for remote ones.
+Workspace renames (press `R` in the Workspaces pane) are display-name overrides
+stored in the workspace catalog; the directory on disk is untouched.
 
 IDs may be shortened as long as the prefix remains unambiguous.
 
