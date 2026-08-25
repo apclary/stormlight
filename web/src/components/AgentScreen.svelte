@@ -14,27 +14,43 @@
    * this plus chrome; the contract lives here so it cannot drift between
    * them.
    *
-   * Watching: no keystrokes, and no size. The terminal is shared, so a
-   * viewer that announced its own geometry would reflow the agent for
-   * everyone — including the dashboard reading it.
+   * Watching: no size, ever. The terminal is shared, so a viewer that
+   * announced its own geometry would reflow the agent for everyone —
+   * including the dashboard reading it.
+   *
+   * Typing is the half that can be handed back. A screen that `typing`
+   * names as able to speak sends keystrokes down the socket while it is
+   * `focused` — what is typed lands at the shared cursor wherever this
+   * screen scales it, so it needs no geometry of its own. A screen that
+   * cannot type (the wall's) registers no input at all.
    */
-  let { id, visible }: { id: string; visible: boolean } = $props();
+  let {
+    id,
+    visible,
+    typing = false,
+    focused = false,
+  }: { id: string; visible: boolean; typing?: boolean; focused?: boolean } =
+    $props();
 
   let viewport: HTMLDivElement;
   let screen: HTMLDivElement;
   let scale = $state(1);
   let shiftX = $state(0);
   let shiftY = $state(0);
+  let term = $state<Terminal>();
 
   $effect(() => {
     if (!visible || !screen) return;
     // `id` is a string prop, deliberately never the agent object: every
     // roster push re-proxies every agent, and an effect depending on the
     // object would tear down and re-attach every terminal at the
-    // roster's cadence.
+    // roster's cadence. `typing` is a capability fixed at mount, and
+    // `focused` is read by the effect below, never here — the keyboard
+    // changing hands must not rebuild the terminal it is handed to.
     const agentID = id;
+    const canType = typing;
 
-    const term = new Terminal({
+    const built = new Terminal({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       fontSize: 12,
       lineHeight: 1.1,
@@ -45,27 +61,40 @@
       // the fleet.
       scrollback: 0,
       allowProposedApi: true,
+      // Closed until focus opens it: an unfocused screen produces no
+      // input at all, keyboard or mouse report, and the one that cannot
+      // type never opens.
       disableStdin: true,
-      cursorBlink: false,
+      // The cursor is drawn only while xterm has focus, which is only
+      // ever the tile holding the keyboard. A watched screen shows
+      // none: a block cursor on every tile reads as a fleet mid-type.
+      // Said at construction rather than by rewriting the theme on
+      // focus, because a theme write is a full restyle of the terminal
+      // — and this runs once per tile across the fleet.
+      cursorInactiveStyle: "none",
+      cursorBlink: true,
       theme: {
         background: terminal.background,
         foreground: terminal.foreground,
-        // The cursor, hidden: a watched screen takes no keystrokes, and
-        // a block cursor on every tile reads as a fleet mid-type.
-        cursor: terminal.background,
+        cursor: terminal.cursor,
       },
     });
+    // The wheel is the surface's, never the agent's: there is no
+    // scrollback to move, and a tile that reported the wheel to an agent
+    // in mouse mode would scroll its history while the canvas panned.
+    built.attachCustomWheelEventHandler(() => false);
     const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(screen);
+    built.loadAddon(fitAddon);
+    built.open(screen);
+    term = built;
 
     const attachment: Attachment = attach(
-      term,
+      built,
       fitAddon,
       agentID,
       () => false,
       () => {},
-      { watching: true },
+      { watching: true, typing: canType },
     );
 
     // The whole screen, shrunk, rather than a corner of it: a fleet is
@@ -101,8 +130,20 @@
       clearInterval(frames);
       sizes.disconnect();
       attachment.close();
-      term.dispose();
+      term = undefined;
+      built.dispose();
     };
+  });
+
+  // The keyboard changing hands, on the terminal that already exists.
+  // Focus opens stdin; losing it closes stdin again, so a tile that was
+  // typed into and left goes back to being a picture. The cursor
+  // follows xterm's own focus, per the construction above.
+  $effect(() => {
+    if (!term || !typing) return;
+    term.options.disableStdin = !focused;
+    if (focused) term.focus();
+    else term.blur();
   });
 </script>
 

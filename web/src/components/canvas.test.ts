@@ -9,12 +9,16 @@ import { flushSync, mount, unmount } from "svelte";
 import type { Agent } from "../lib/types";
 
 const lifecycle: string[] = [];
-/** Every attach's contract: did it watch, and did it claim layout?
- *  Recorded so a refactor that quietly drops { watching: true } — or
- *  starts answering isLaidOut with true — fails a test instead of
+/** Every attach's contract: did it watch, did it claim layout, and can
+ *  it type? Recorded so a refactor that quietly drops { watching: true }
+ *  — or starts answering isLaidOut with true — fails a test instead of
  *  resizing the fleet's shared terminals. */
-const contracts: Array<{ id: string; watching: boolean; laidOut: boolean }> =
-  [];
+const contracts: Array<{
+  id: string;
+  watching: boolean;
+  laidOut: boolean;
+  typing: boolean;
+}> = [];
 
 vi.mock("../lib/terminal", () => ({
   attach: (
@@ -23,13 +27,14 @@ vi.mock("../lib/terminal", () => ({
     id: string,
     isLaidOut: () => boolean,
     _onConnection: unknown,
-    options?: { watching?: boolean },
+    options?: { watching?: boolean; typing?: boolean },
   ) => {
     lifecycle.push(`attach:${id}`);
     contracts.push({
       id,
       watching: options?.watching === true,
       laidOut: isLaidOut(),
+      typing: options?.typing === true,
     });
     return {
       fit: () => {},
@@ -38,12 +43,24 @@ vi.mock("../lib/terminal", () => ({
   },
 }));
 
+/** What xterm does with focus, observed: a walked-in tile must ask
+ *  its terminal for the keyboard, and one walked out of must let go. */
+const focusCalls: string[] = [];
+
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
+    options: Record<string, unknown> = { disableStdin: true, theme: {} };
     open() {}
     loadAddon() {}
+    attachCustomWheelEventHandler() {}
     resize() {}
     write() {}
+    focus() {
+      focusCalls.push(`focus:${this.options.disableStdin}`);
+    }
+    blur() {
+      focusCalls.push(`blur:${this.options.disableStdin}`);
+    }
     dispose() {}
   },
 }));
@@ -59,7 +76,22 @@ class StillObserver {
   unobserve() {}
   disconnect() {}
 }
-vi.stubGlobal("IntersectionObserver", StillObserver);
+/** The visibility observers, held so a test can scroll every tile off
+ *  screen at once — jsdom lays nothing out, so nothing ever really
+ *  leaves the viewport. */
+const watchers: Array<(entries: Array<{ isIntersecting: boolean }>) => void> =
+  [];
+class HeldObserver extends StillObserver {
+  constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) {
+    super();
+    watchers.push(callback);
+  }
+}
+const scrollAllAway = () => {
+  for (const watcher of watchers) watcher([{ isIntersecting: false }]);
+  flushSync();
+};
+vi.stubGlobal("IntersectionObserver", HeldObserver);
 vi.stubGlobal("ResizeObserver", StillObserver);
 
 // Not jsdom's storage and not Node's: newer Node ships an experimental
@@ -75,6 +107,7 @@ vi.stubGlobal("localStorage", {
 });
 
 import Canvas from "./Canvas.svelte";
+import { ui } from "../lib/commands.svelte";
 import { fleet } from "../lib/state.svelte";
 import { tileMin, tileSize } from "../lib/canvas";
 
@@ -134,6 +167,7 @@ function pointer(
 ): MouseEvent {
   const event = new MouseEvent(type, {
     bubbles: true,
+    cancelable: true,
     clientX: x,
     clientY: y,
     button: 0,
@@ -162,10 +196,14 @@ function boxOf(tile: HTMLElement) {
 beforeEach(() => {
   lifecycle.length = 0;
   contracts.length = 0;
+  focusCalls.length = 0;
+  watchers.length = 0;
   localStorage.clear();
   fleet.agents = [];
   fleet.selectedID = "";
   fleet.workspaceID = "";
+  ui.view = "canvas";
+  ui.walkedIn = false;
 });
 
 describe("the canvas against the roster", () => {
@@ -263,13 +301,20 @@ describe("the canvas against the roster", () => {
     done();
   });
 
-  test("every attachment watches, and claims no layout", () => {
+  // Typing is the half of watching a tile hands back; geometry never
+  // is. A tile that claimed layout would resize the fleet's shared
+  // terminals to the size of whatever it was scaled into.
+  test("every attachment watches, can type, and claims no layout", () => {
     const done = mountCanvas();
     push({ id: "a" }, { id: "b" });
 
     expect(contracts.length).toBeGreaterThan(0);
     for (const contract of contracts) {
-      expect(contract).toMatchObject({ watching: true, laidOut: false });
+      expect(contract).toMatchObject({
+        watching: true,
+        laidOut: false,
+        typing: true,
+      });
     }
     done();
   });
@@ -433,18 +478,312 @@ describe("gestures", () => {
     done();
   });
 
-  test("a press that never travels opens the agent", () => {
+  test("a press that never travels walks into the agent, in place", () => {
     let opened = 0;
     const done = mountCanvas(() => opened++);
     push({ id: "a" }, { id: "b" });
+    focusCalls.length = 0;
 
     const tile = tileFor("b");
     tile.dispatchEvent(pointer("pointerdown", 100, 100));
     tile.dispatchEvent(pointer("pointerup", 101, 101));
     flushSync();
 
+    // The keyboard moved, the view did not.
+    expect(opened).toBe(0);
+    expect(fleet.selectedID).toBe("b");
+    expect(ui.walkedIn).toBe(true);
+    expect(ui.view).toBe("canvas");
+    // The tile says so, and its terminal — the one — is the walk's
+    // anchor with stdin open.
+    expect(tileFor("b").classList.contains("focused")).toBe(true);
+    expect(tileFor("a").classList.contains("focused")).toBe(false);
+    const anchors = document.querySelectorAll("[data-walk-target]");
+    expect(anchors).toHaveLength(1);
+    expect(tileFor("b").contains(anchors[0])).toBe(true);
+    expect(focusCalls).toEqual(["focus:false"]);
+    done();
+  });
+
+  test("walking out closes the tile's keyboard again", () => {
+    const done = mountCanvas();
+    push({ id: "a" });
+    const tile = tileFor("a");
+    tile.dispatchEvent(pointer("pointerdown", 100, 100));
+    tile.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+    focusCalls.length = 0;
+
+    ui.walkedIn = false;
+    flushSync();
+
+    expect(tileFor("a").classList.contains("focused")).toBe(false);
+    expect(document.querySelectorAll("[data-walk-target]")).toHaveLength(0);
+    expect(focusCalls).toEqual(["blur:true"]);
+    done();
+  });
+
+  // Whether a button takes focus on click is the browser's opinion,
+  // and the walk must not be: ↗ opens the roster to look, on every
+  // browser, even from a tile that was being typed into.
+  test("the label's open button is the way to the roster, not walked in", () => {
+    let opened = 0;
+    const done = mountCanvas(() => opened++);
+    push({ id: "a" }, { id: "b" });
+    const a = tileFor("a");
+    a.dispatchEvent(pointer("pointerdown", 100, 100));
+    a.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+    expect(ui.walkedIn).toBe(true);
+
+    tileFor("b").querySelector<HTMLButtonElement>(".open")!.click();
+    flushSync();
+
     expect(opened).toBe(1);
     expect(fleet.selectedID).toBe("b");
+    expect(ui.walkedIn).toBe(false);
+    done();
+  });
+
+  // A press that begins a gesture moves no focus. Left to the browser,
+  // a mousedown on tile B lands focus on B — the tile itself, or xterm's
+  // textarea inside it — and blurs the terminal in A that holds the
+  // keyboard: rearranging one tile ended the typing in another.
+  test("a gesture's press is cancelled, so it moves no focus", () => {
+    const done = mountCanvas();
+    push({ id: "a" }, { id: "b" });
+    const a = tileFor("a");
+    a.dispatchEvent(pointer("pointerdown", 100, 100));
+    a.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+
+    // Another tile's screen: a drag surface, cancelled.
+    const b = tileFor("b");
+    const onB = pointer("pointerdown", 100, 100);
+    b.querySelector<HTMLElement>(".screen")!.dispatchEvent(onB);
+    expect(onB.defaultPrevented).toBe(true);
+    b.dispatchEvent(pointer("pointermove", 200, 200));
+    b.dispatchEvent(pointer("pointerup", 200, 200));
+    flushSync();
+    expect(ui.walkedIn).toBe(true);
+    expect(tileFor("a").classList.contains("focused")).toBe(true);
+
+    // The focused tile's own label and grip: gestures, cancelled.
+    const onLabel = pointer("pointerdown", 100, 100);
+    a.querySelector<HTMLElement>(".label")!.dispatchEvent(onLabel);
+    expect(onLabel.defaultPrevented).toBe(true);
+    a.dispatchEvent(pointer("pointerup", 100, 100));
+    const onGrip = pointer("pointerdown", 100, 100);
+    a.querySelector<HTMLElement>(".grip")!.dispatchEvent(onGrip);
+    expect(onGrip.defaultPrevented).toBe(true);
+    a.dispatchEvent(pointer("pointerup", 100, 100));
+
+    // Inside xterm on the focused tile: the terminal's own press, for
+    // selecting text, left alone.
+    const xterm = document.createElement("div");
+    xterm.className = "xterm";
+    a.querySelector<HTMLElement>(".frame")!.append(xterm);
+    const onTerminal = pointer("pointerdown", 100, 100);
+    xterm.dispatchEvent(onTerminal);
+    expect(onTerminal.defaultPrevented).toBe(false);
+
+    // The focused tile's margin — the slack around its scaled screen —
+    // is nobody's: a press there parked focus on the tile host, where
+    // the walk survived and the keys reached nothing.
+    const onMargin = pointer("pointerdown", 100, 100);
+    a.querySelector<HTMLElement>(".screen")!.dispatchEvent(onMargin);
+    expect(onMargin.defaultPrevented).toBe(true);
+    done();
+  });
+
+  // The walk's anchor is the whole tile. Focus that lands on the tile
+  // itself — the browser's answer to a press on its label — is still
+  // inside the walk, and must not read as walking out.
+  test("the walk's anchor is the tile, not the screen inside it", () => {
+    const done = mountCanvas();
+    push({ id: "a" });
+    const a = tileFor("a");
+    a.dispatchEvent(pointer("pointerdown", 100, 100));
+    a.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+
+    expect(a.hasAttribute("data-walk-target")).toBe(true);
+    done();
+  });
+
+  // A terminal disposed for scrolling off screen takes the focus with
+  // it, and the walk with the focus. The one holding the keyboard is
+  // the one that must never be.
+  test("the focused tile stays attached wherever the camera goes", () => {
+    const done = mountCanvas();
+    push({ id: "a" }, { id: "b" }, { id: "c" });
+    const b = tileFor("b");
+    b.dispatchEvent(pointer("pointerdown", 100, 100));
+    b.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+    lifecycle.length = 0;
+
+    scrollAllAway();
+
+    expect(lifecycle.filter((e) => e.startsWith("close:")).sort()).toEqual([
+      "close:a",
+      "close:c",
+    ]);
+    done();
+  });
+
+  test("walking into a tile that scrolled away brings its terminal back", () => {
+    const done = mountCanvas();
+    push({ id: "a" }, { id: "b" });
+    scrollAllAway();
+    lifecycle.length = 0;
+
+    const b = tileFor("b");
+    b.dispatchEvent(pointer("pointerdown", 100, 100));
+    b.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+
+    expect(lifecycle).toEqual(["attach:b"]);
+    expect(focusCalls.at(-1)).toBe("focus:false");
+    done();
+  });
+
+  // The screen of the tile you are typing into belongs to its terminal:
+  // a press there is a selection, not a lift.
+  test("the focused tile drags by its label alone", () => {
+    const done = mountCanvas();
+    push({ id: "a" });
+    const tile = tileFor("a");
+    tile.dispatchEvent(pointer("pointerdown", 100, 100));
+    tile.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+    const before = boxOf(tileFor("a"));
+
+    const screen = tile.querySelector<HTMLElement>(".screen")!;
+    screen.dispatchEvent(pointer("pointerdown", 100, 100));
+    screen.dispatchEvent(pointer("pointermove", 160, 140));
+    screen.dispatchEvent(pointer("pointerup", 160, 140));
+    flushSync();
+    expect(boxOf(tileFor("a"))).toEqual(before);
+
+    const label = tile.querySelector<HTMLElement>(".label")!;
+    label.dispatchEvent(pointer("pointerdown", 100, 100));
+    label.dispatchEvent(pointer("pointermove", 160, 140));
+    label.dispatchEvent(pointer("pointerup", 160, 140));
+    flushSync();
+    expect(boxOf(tileFor("a")).x).toBeCloseTo(before.x + 60);
+    done();
+  });
+
+  // The terminal's keystrokes bubble up through the tile, which has
+  // Enter bound. An Enter typed at agent a must not also be an Enter
+  // pressed on a's tile — which would drag the cursor back to a from
+  // wherever it had since moved.
+  test("an Enter typed at the agent is not an Enter pressed on the tile", () => {
+    const done = mountCanvas();
+    push({ id: "a" }, { id: "b" });
+    const tile = tileFor("a");
+    tile.dispatchEvent(pointer("pointerdown", 100, 100));
+    tile.dispatchEvent(pointer("pointerup", 100, 100));
+    flushSync();
+    fleet.selectedID = "b";
+    flushSync();
+
+    const screen = tile.querySelector<HTMLElement>(".screen")!;
+    screen.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    flushSync();
+    expect(fleet.selectedID).toBe("b");
+
+    tile.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    flushSync();
+    expect(fleet.selectedID).toBe("a");
+    done();
+  });
+});
+
+describe("the cursor and the camera", () => {
+  const wheelBy = (dx: number, dy: number) => {
+    document
+      .querySelector<HTMLElement>(".canvas")!
+      .dispatchEvent(
+        new WheelEvent("wheel", { deltaX: dx, deltaY: dy, bubbles: true }),
+      );
+    flushSync();
+  };
+  const camera = () => document.querySelector<HTMLElement>(".stage")!.style.transform;
+
+  // alt+j and alt+n move the cursor without a hand on the canvas, and
+  // the tile they land on may be off the edge of the world.
+  test("a selection wholly off screen is brought into view", () => {
+    const done = mountCanvas();
+    push({ id: "a" }, { id: "b" });
+    // jsdom lays nothing out, so the viewport is 0×0 and every tile
+    // is off screen by definition; the pan below makes the point
+    // regardless of extent.
+    wheelBy(5000, 5000);
+    const panned = camera();
+
+    fleet.selectedID = "b";
+    flushSync();
+
+    expect(camera()).not.toBe(panned);
+    done();
+  });
+
+  // The camera follows the cursor, not the tile: a hand that drags the
+  // selected tile away and lets go must not watch the camera chase it.
+  test("dragging the selected tile away does not drag the camera after it", () => {
+    const done = mountCanvas();
+    push({ id: "a" }, { id: "b" });
+    fleet.selectedID = "a";
+    flushSync();
+    const before = camera();
+
+    const a = tileFor("a");
+    a.dispatchEvent(pointer("pointerdown", 100, 100));
+    a.dispatchEvent(pointer("pointermove", 5000, 5000));
+    a.dispatchEvent(pointer("pointerup", 5000, 5000));
+    flushSync();
+
+    expect(camera()).toBe(before);
+    done();
+  });
+
+  // A dispatched agent is selected before its tile exists; the tile is
+  // minted a tick later, and that is when there is something to show.
+  test("a selection made before its tile is minted is still revealed", () => {
+    const done = mountCanvas();
+    push({ id: "a" });
+    wheelBy(5000, 5000);
+    const panned = camera();
+
+    fleet.selectedID = "late";
+    flushSync();
+    expect(camera()).toBe(panned);
+    push({ id: "a" }, { id: "late" });
+
+    expect(camera()).not.toBe(panned);
+    done();
+  });
+
+  test("the camera follows the cursor, never the other way round", () => {
+    const done = mountCanvas();
+    push({ id: "a" }, { id: "b" });
+    fleet.selectedID = "b";
+    flushSync();
+    const centred = camera();
+
+    // Panning away from the selected tile is the hand's decision; the
+    // cursor has not moved and the camera must not snap back.
+    wheelBy(5000, 5000);
+    expect(camera()).not.toBe(centred);
+    const panned = camera();
+    push({ id: "a" }, { id: "b", summary: "still b" });
+    expect(camera()).toBe(panned);
     done();
   });
 

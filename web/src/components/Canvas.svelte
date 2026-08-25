@@ -1,10 +1,14 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+  import { run, ui } from "../lib/commands.svelte";
   import { agentsIn, fleet } from "../lib/state.svelte";
   import { canvasLayout } from "../lib/layout.svelte";
   import {
+    centeredOn,
     fitView,
     homeView,
     panBy,
+    showing,
     zoomAt,
     type Box,
     type View,
@@ -18,6 +22,11 @@
   // A fresh store per workspace: switching workspaces in the rail swaps
   // the whole arrangement, each remembered separately.
   const layout = $derived(canvasLayout(fleet.workspaceID));
+
+  // The tile with the keyboard: the selected agent's, while walked in.
+  // The canvas types in place, so the walk that puts the keyboard in
+  // the roster's pane puts it here instead when this is the view.
+  const focused = $derived(ui.walkedIn ? fleet.selectedID : "");
 
   let clip = $state<HTMLDivElement>();
   let view = $state<View>(homeView);
@@ -58,6 +67,38 @@
     if (fittedFor === workspace || agents.length === 0 || !clip) return;
     fittedFor = workspace;
     fit();
+  });
+
+  const viewport = () => ({ w: clip!.clientWidth, h: clip!.clientHeight });
+
+  /** The camera, centred on a box at a zoom it can be read at. */
+  const centerOn = (box: Box) => {
+    if (!clip) return;
+    view = centeredOn(view, box, viewport());
+  };
+
+  // The cursor can move by key — alt+j, alt+n — onto a tile the hand
+  // never went near, and on a canvas that may be ten screens away. A
+  // selection nobody can see is not one, so a tile wholly off screen is
+  // brought to the centre; one that is even partly on screen is left
+  // where the hand put the camera.
+  //
+  // Each selection is revealed once, when it has a tile — which may be
+  // a tick after it was made, since a dispatched agent is selected
+  // before its box is minted. The box is tracked for that tick and no
+  // longer: a drag that rewrites the selected tile's box re-runs this,
+  // and revealing it again would have the camera chase the tile the
+  // hand just pushed off screen. The camera is never tracked, or a pan
+  // that carried the tile off the edge would snap it back.
+  let revealed = "";
+  $effect(() => {
+    const id = fleet.selectedID;
+    const box = layout.tiles[id];
+    if (!box || !clip || revealed === id) return;
+    revealed = id;
+    untrack(() => {
+      if (!showing(view, box, viewport())) centerOn(box);
+    });
   });
 
   /**
@@ -118,9 +159,8 @@
     // burning an index on one minted a tick from now would silently
     // skip an agent per press.
     let box;
-    let target;
     for (let step = 0; step < urgent.length; step++) {
-      target = urgent[(jumpAt + step) % urgent.length];
+      const target = urgent[(jumpAt + step) % urgent.length];
       box = layout.tiles[target.id];
       if (box) {
         jumpAt = (jumpAt + step + 1) % urgent.length;
@@ -128,12 +168,26 @@
       }
     }
     if (!box) return;
-    const z = Math.max(view.z, 0.5);
-    view = {
-      x: clip.clientWidth / 2 - (box.x + box.w / 2) * z,
-      y: clip.clientHeight / 2 - (box.y + box.h / 2) * z,
-      z,
-    };
+    centerOn(box);
+  };
+
+  /** A click on a tile: the cursor moves there and the keyboard with
+   *  it. Both are the roster's own commands, which on this view stay
+   *  on this view. */
+  const enter = (id: string) => {
+    run("select-agent", id);
+    run("walk-in");
+  };
+
+  /** The label's ↗: the roster's full pane, to look at. Letting go of
+   *  the keyboard is said here rather than left to focus, because
+   *  whether a button takes focus on click is the browser's opinion —
+   *  and arriving on the roster typing to an agent nobody walked into
+   *  is the wrong answer on any of them. */
+  const open = (id: string) => {
+    ui.walkedIn = false;
+    run("select-agent", id);
+    onopen();
   };
 </script>
 
@@ -163,11 +217,11 @@
           box={layout.tiles[agent.id]}
           zoom={view.z}
           {clip}
+          selected={fleet.selectedID === agent.id}
+          focused={focused === agent.id}
           oncommit={(box) => layout.put(agent.id, box)}
-          onopen={() => {
-            fleet.selectedID = agent.id;
-            onopen();
-          }}
+          onenter={() => enter(agent.id)}
+          onopen={() => open(agent.id)}
         />
       {/if}
     {/each}
