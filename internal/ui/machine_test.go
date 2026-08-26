@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/trentkm/stormlight/internal/agent"
 	"github.com/trentkm/stormlight/internal/workspace"
 )
@@ -447,5 +448,154 @@ func TestTwoMachinesSameNameStillCollide(t *testing.T) {
 	}
 	if groups[0].label != "srv/api" || groups[1].label != "opt/api" {
 		t.Fatalf("labels = %q, %q", groups[0].label, groups[1].label)
+	}
+}
+
+// TestARemoteWorkspaceRowIsMarkedBesideItsCounts: a workspace on another
+// machine is marked, and the mark sits with the counts rather than ahead
+// of the name. Ahead of the name it was the only thing on the pane
+// starting in that column, with every name indented behind it.
+//
+// The host's initial used to hold this column. It said more — which
+// machine, not merely another one — and it still says it in the expanded
+// row's subtitle, which is the place a machine is worth naming in full.
+func TestARemoteWorkspaceRowIsMarkedBesideItsCounts(t *testing.T) {
+	groups := buildWorkspaceGroups([]workspace.Context{
+		{ID: "git:/srv/api/.git", Kind: "git", Name: "here", Root: "/srv/api"},
+		// A host whose initial appears nowhere in the row's own text, so
+		// a leftover letter mark has nothing to hide behind.
+		{Host: "devbox", ID: "devbox:git:/opt/api/.git", Kind: "git",
+			Name: "there", Root: "/opt/api"},
+	}, nil)
+	model := Model{}
+
+	for _, focused := range []bool{false, true} {
+		local := ansi.Strip(
+			model.renderWorkspaceRow(groups[0], focused, focused, 30, false))
+		remote := ansi.Strip(
+			model.renderWorkspaceRow(groups[1], focused, focused, 30, false))
+
+		if strings.Contains(local, remoteGlyph) {
+			t.Errorf("focused=%v: a workspace on this machine is marked: %q",
+				focused, local)
+		}
+		glyph := strings.Index(remote, remoteGlyph)
+		if glyph < 0 {
+			t.Fatalf("focused=%v: no mark on a remote workspace: %q",
+				focused, remote)
+		}
+		name := strings.Index(remote, "there")
+		if glyph < name {
+			t.Errorf("focused=%v: the mark leads the row: %q", focused, remote)
+		}
+		// Nothing but the gap stands between the name and the mark, and
+		// the counts follow it immediately: the mark belongs to that
+		// cluster, not to the name it is separated from.
+		between := remote[name+len("there") : glyph]
+		if strings.TrimLeft(between, " ") != "" {
+			t.Errorf("focused=%v: %q sits between the name and the mark: %q",
+				focused, between, remote)
+		}
+		if !strings.HasPrefix(remote[glyph:], remoteGlyph+" ·") {
+			t.Errorf("focused=%v: the counts do not follow the mark: %q",
+				focused, remote[glyph:])
+		}
+		// And the letter is gone rather than joined.
+		if strings.Contains(remote, "D") {
+			t.Errorf("focused=%v: the host initial is still marked: %q",
+				focused, remote)
+		}
+	}
+
+	// Dropping the letter is only affordable because the machine is named
+	// in full a line below, so that line is part of this behaviour rather
+	// than a neighbour of it.
+	expanded := model
+	expanded.rowsExpanded = true
+	row := ansi.Strip(expanded.renderWorkspaceRow(groups[1], false, false, 30, false))
+	if !strings.Contains(row, "devbox") {
+		t.Errorf("the expanded row does not name the machine: %q", row)
+	}
+}
+
+// TestARemoteWorkspaceRowSpendsItsMarkOutOfTheChips: the mark is two
+// columns, and something has to pay for them. The chips pay — they are
+// fitted after the mark is spent, so a quiet tier drops off the right
+// rather than the name losing letters. Fitted before, against the width a
+// local row has, a twenty-two column pane showed "there…" beside two chips
+// where it should show "there-is-a…" beside one.
+func TestARemoteWorkspaceRowSpendsItsMarkOutOfTheChips(t *testing.T) {
+	// A name of one repeated letter so the name's columns can be counted
+	// out of the rendered row.
+	name := strings.Repeat("a", 20)
+	remote := workspace.Context{
+		Host: "devbox", ID: "devbox:git:/opt/api/.git", Kind: "git",
+		Name: name, Root: "/opt/api", ExecutionRoot: "/opt/api",
+	}
+	// Three tiers of population, so the chips ask for everything they can.
+	groups := buildWorkspaceGroups([]workspace.Context{remote}, []agent.Agent{
+		{ID: "a", Host: "devbox", Workspace: remote, ProcessLive: true,
+			Attention: agent.AttentionApproval},
+		{ID: "b", Host: "devbox", Workspace: remote, ProcessLive: true,
+			Attention: agent.AttentionWaiting},
+		{ID: "c", Host: "devbox", Workspace: remote, ProcessLive: true,
+			Activity: agent.ActivityWorking},
+	})
+	model := Model{}
+	for _, width := range []int{22, 24, 26, 28, 34} {
+		line := strings.Split(ansi.Strip(
+			model.renderWorkspaceRow(groups[0], false, false, width, false)), "\n")[0]
+		// What the row promised the name: the same floor fitCountChips
+		// fits the chips around.
+		contentWidth := max(1, width-1)
+		nameNeed := min(10, max(1, contentWidth/2))
+		// The ellipsis is one of the name's own columns, not a column
+		// taken from it.
+		got := strings.Count(line, "a") + strings.Count(line, "…")
+		if got < nameNeed {
+			t.Errorf("width=%d: the name kept %d columns, wanted %d: %q",
+				width, got, nameNeed, line)
+		}
+	}
+}
+
+// TestARemoteWorkspaceRowStillFitsItsPane: name and gap both bottom out at
+// one column, so the row's fixed furniture — gutter, mark, the loudest
+// chip — is what decides the narrowest pane it can be drawn in. A row
+// wider than its pane wraps, which costs the list a line and every row
+// below it its place.
+//
+// From eleven: below that the mark and the chip alone are wider than the
+// pane, and the row has overhung by a column or two for as long as
+// anything has marked a remote workspace at all.
+func TestARemoteWorkspaceRowStillFitsItsPane(t *testing.T) {
+	remote := workspace.Context{
+		Host: "devbox", ID: "devbox:git:/opt/api/.git", Kind: "git",
+		// Long enough that the name is what the row's remaining columns
+		// are spent on: a short name never reaches the width it was
+		// given, so it never proves the width was computed right.
+		Name: strings.Repeat("a", 40), Root: "/opt/api",
+		ExecutionRoot: "/opt/api",
+	}
+	groups := buildWorkspaceGroups([]workspace.Context{remote}, []agent.Agent{
+		{ID: "a", Host: "devbox", Workspace: remote, ProcessLive: true,
+			Attention: agent.AttentionApproval},
+		{ID: "b", Host: "devbox", Workspace: remote, ProcessLive: true,
+			Attention: agent.AttentionWaiting},
+		{ID: "c", Host: "devbox", Workspace: remote, ProcessLive: true,
+			Activity: agent.ActivityWorking},
+	})
+	model := Model{}
+	for _, width := range []int{11, 12, 14, 18, 20, 24, 28, 34, 44} {
+		for _, focused := range []bool{false, true} {
+			row := model.renderWorkspaceRow(
+				groups[0], focused, focused, width, false)
+			for _, line := range strings.Split(row, "\n") {
+				if got := ansi.StringWidth(line); got > width {
+					t.Errorf("width=%d focused=%v: row is %d columns: %q",
+						width, focused, got, ansi.Strip(line))
+				}
+			}
+		}
 	}
 }

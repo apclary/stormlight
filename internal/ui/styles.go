@@ -79,6 +79,38 @@ func successStyle() lipgloss.Style {
 // indicator for the header, workspace names, and agent titles.
 const stormlightTitle = "Stormlight"
 
+// StormGlyph is Stormlight's mark: Nerd Font U+F067E,
+// nf-md-weather_lightning_rainy. It opens the wordmark, caps the
+// footer, and leads the oath printed on the way out — every place the
+// program signs its own name. A four-pointed star stood here before, and
+// said only "something bright".
+//
+// Exported for that last one: the farewell is printed by main after the
+// dashboard is gone, and one mark spelled in two places is one that drifts.
+//
+// It is a Private Use Area codepoint, which is a harder bargain than the
+// rest of the dashboard drives. The header is the first thing painted and
+// the last thing anyone would think to blame, so in a terminal without a
+// Nerd Font the identity line opens with an empty box. Nothing can ask a
+// terminal whether it has the glyph, so this is a requirement rather than
+// something to detect and work around, and README says so.
+//
+// One cell wide — in lipgloss, and in a real terminal, which is what the
+// header's gap arithmetic assumes when it places the counters at the far
+// edge. It sits in Plane 15 rather than the Basic Multilingual Plane's
+// private area, which changes nothing about that: both are Private Use,
+// both measure one column.
+//
+// It comes from the Material Design set rather than the Weather Icons set
+// the mark started in, and the reason is size. Patched into a Mono
+// variant, every glyph is squeezed into one cell, and the two sets do not
+// arrive there the same: measured in JetBrains Mono Nerd Font Mono, the
+// weather icon inked 446x462 against a capital M's 456x730, while this one
+// fills 600x544. Same column, half again the ink, which is the only sense
+// in which a terminal glyph can be made bigger — the cell belongs to the
+// font, not to us.
+const StormGlyph = "\U000f067e"
+
 // shimmerRest adds off-screen travel on both ends of each sweep so the glow
 // rests at the base shade between passes instead of wrapping abruptly.
 const shimmerRest = 14
@@ -150,7 +182,7 @@ func renderWordmark(phase int) string {
 			Light: wordmarkStopsLight[1],
 			Dark:  wordmarkStopsDark[1],
 		}))
-	out.WriteString(glint.Render("✦ "))
+	out.WriteString(glint.Render(StormGlyph + " "))
 	for index, letter := range runes {
 		t := 0.0
 		if len(runes) > 1 {

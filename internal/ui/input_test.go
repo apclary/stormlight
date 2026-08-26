@@ -2686,3 +2686,91 @@ func runeIndex(runes []rune, want rune) int {
 	}
 	return -1
 }
+
+// TestTheWordmarkOpensWithTheStorm: the header is the dashboard's identity
+// line, and the mark in front of the name is part of the name. It is also
+// the one glyph every run draws whether or not anything is happening, so a
+// change to it is a change every user sees on every launch — worth a test
+// that says which glyph, rather than one that says "some glyph".
+func TestTheWordmarkOpensWithTheStorm(t *testing.T) {
+	// Both ends of the shimmer: at rest, and with the band mid-sweep.
+	for _, phase := range []int{-1, 0, 4, 12} {
+		wordmark := ansi.Strip(renderWordmark(phase))
+		if !strings.HasPrefix(wordmark, StormGlyph+" ") {
+			t.Errorf("phase=%d: wordmark = %q, want it to open with %q",
+				phase, wordmark, StormGlyph)
+		}
+		if !strings.HasSuffix(wordmark, stormlightTitle) {
+			t.Errorf("phase=%d: wordmark = %q, want it to end in the name",
+				phase, wordmark)
+		}
+		// The glyph is one cell, so the header's gap arithmetic — which
+		// measures the wordmark to place the counters — is unchanged by it.
+		if got, want := ansi.StringWidth(wordmark),
+			len(stormlightTitle)+2; got != want {
+			t.Errorf("phase=%d: wordmark is %d columns, want %d: %q",
+				phase, got, want, wordmark)
+		}
+	}
+}
+
+// TestTheFooterIsCappedByTheStorm: the header opens with the mark and the
+// footer closes with it, in the same sky stop — the frame signs both ends
+// or neither. The cap also swaps sides with the seam, so both layouts are
+// worth pinning: a mark that only survives one of them is a mark that
+// disappears when someone walks into a terminal.
+func TestTheFooterIsCappedByTheStorm(t *testing.T) {
+	model := NewModel(stubBackend{})
+	model.width = 100
+
+	left := ansi.Strip(model.renderFooter())
+	row := lastLine(left)
+	if !strings.HasPrefix(row, " "+StormGlyph+" ") {
+		t.Errorf("the hint row does not lead with the mark: %q", row)
+	}
+
+	// Walked in: the hints lead and the mark caps the far end instead.
+	model.ptyEnabled = true
+	model.activePane = paneInteraction
+	if !model.terminalFocused() {
+		t.Fatal("the terminal did not take focus; the mirrored footer is untested")
+	}
+	row = lastLine(ansi.Strip(model.renderFooter()))
+	if !strings.HasSuffix(strings.TrimRight(row, " "), StormGlyph) {
+		t.Errorf("the mirrored row does not end with the mark: %q", row)
+	}
+	if strings.HasPrefix(row, " "+StormGlyph) {
+		t.Errorf("the mark stayed on the left as well: %q", row)
+	}
+}
+
+// TestTheFrameStandsOffTheWall: the mark opens the header and caps the
+// footer, and both stand one column in. The header's sat flush against the
+// terminal's left edge — the only ink on screen touching it, with the
+// whole dashboard indented behind it, so the mark read as clipped rather
+// than placed.
+func TestTheFrameStandsOffTheWall(t *testing.T) {
+	model := flowModelFixture(t, &flowBackend{})
+	lines := strings.Split(ansi.Strip(model.View().Content), "\n")
+
+	marked := []int{}
+	for index, line := range lines {
+		if strings.Contains(line, StormGlyph) {
+			marked = append(marked, index)
+		}
+	}
+	if len(marked) != 2 {
+		t.Fatalf("the frame carries %d marks, want the header's and the "+
+			"footer's", len(marked))
+	}
+	for _, index := range marked {
+		line := lines[index]
+		// Columns, not bytes: the mark is multi-byte and what is being
+		// asked is where it lands on screen.
+		column := ansi.StringWidth(line[:strings.Index(line, StormGlyph)])
+		if column != 1 {
+			t.Errorf("line %d puts the mark in column %d, want 1: %q",
+				index, column, line[:min(24, len(line))])
+		}
+	}
+}
