@@ -20,7 +20,10 @@ The CLI adapters currently add provider-native lifecycle callbacks:
   `working` until its process exited. The notifier has no trust gate, so it
   is the floor and the hooks are the ceiling. Both surfaces report a turn
   end once trusted; the two events carry identical state, so applying both
-  is idempotent.
+  is idempotent. An Esc-aborted turn reports on neither surface, so the
+  application service observes bare Esc after forwarding it to a working
+  Codex terminal and settles the activity to idle. Escape-prefixed terminal
+  sequences are not interruption signals.
 - Claude: per-launch prompt, notification, and stop hooks report state.
   Permission prompts raise attention through the notification hook; they
   are answered in the agent's own terminal, never intercepted.
@@ -48,7 +51,9 @@ SDK can similarly replace its CLI hook bridge. The runtime exposes
 The application service validates requests, resolves a provider and workspace,
 and delegates terminal operations to the runtime. The TUI, the CLI, and the
 HTTP API all use the same service. A persistent workspace catalog supplies
-workspaces that do not currently contain an agent.
+workspaces that do not currently contain an agent. Terminal attachments pass
+through the service so provider lifecycle gaps, such as Codex's unreported Esc
+abort, are handled identically by terminal and web clients.
 
 Workspace resolvers return a stable group ID, a group root, an execution root,
 and optional component metadata. External executable resolvers run before the

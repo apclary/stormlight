@@ -930,5 +930,61 @@ func (s *Service) AttachTerminal(ctx context.Context, id string, cols, rows int)
 	if !ok {
 		return nil, fmt.Errorf("runtime does not stream terminals")
 	}
-	return streamer.AttachTerminal(ctx, id, cols, rows)
+	transport, err := streamer.AttachTerminal(ctx, id, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	return &observedTerminal{
+		Transport: transport,
+		observe: func(input []byte) {
+			s.observeTerminalInput(id, input)
+		},
+	}, nil
+}
+
+type observedTerminal struct {
+	pty.Transport
+	observe func([]byte)
+}
+
+func (t *observedTerminal) Write(input []byte) error {
+	if err := t.Transport.Write(input); err != nil {
+		return err
+	}
+	t.observe(input)
+	return nil
+}
+
+// observeTerminalInput covers lifecycle changes the provider cannot report.
+// Codex aborts a turn on bare Esc without running Stop or notify, so the
+// terminal input is the only signal that its working state has ended.
+func (s *Service) observeTerminalInput(id string, input []byte) {
+	if len(input) != 1 || input[0] != 0x1b {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	managedAgent, err := s.find(ctx, id)
+	if err != nil {
+		diagnostic.Logger().Warn("terminal input state lookup failed",
+			"agent_id", id,
+			"error", err,
+		)
+		return
+	}
+	if managedAgent.Provider != agent.ProviderCodex ||
+		!managedAgent.ProcessLive ||
+		(managedAgent.Activity != agent.ActivityWorking &&
+			managedAgent.Activity != agent.ActivityStarting) {
+		return
+	}
+	if err := s.Update(ctx, id, session.Update{Activity: agent.ActivityIdle}); err != nil {
+		// The key already reached Codex. State bookkeeping must not tear
+		// down the terminal attachment after the interrupt succeeded.
+		diagnostic.Logger().Warn("terminal interrupt state update failed",
+			"agent_id", id,
+			"error", err,
+		)
+	}
 }

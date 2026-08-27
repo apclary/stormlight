@@ -11,6 +11,7 @@ import (
 	"github.com/trentkm/stormlight/internal/agent"
 	"github.com/trentkm/stormlight/internal/history"
 	"github.com/trentkm/stormlight/internal/provider"
+	"github.com/trentkm/stormlight/internal/pty"
 	"github.com/trentkm/stormlight/internal/session"
 	"github.com/trentkm/stormlight/internal/workspace"
 )
@@ -21,6 +22,7 @@ type recordingRuntime struct {
 	workspaceID string
 	updates     []session.Update
 	commands    []string
+	terminal    pty.Transport
 }
 
 type rootsResolver struct {
@@ -57,6 +59,9 @@ func (r *recordingRuntime) Update(
 		if r.agents[index].ID != id {
 			continue
 		}
+		if update.Activity != "" {
+			r.agents[index].Activity = update.Activity
+		}
 		if update.SessionName != "" {
 			r.agents[index].SessionName = update.SessionName
 		}
@@ -86,6 +91,151 @@ func (r *recordingRuntime) SetWorkspace(
 ) error {
 	r.workspaceID = id
 	return nil
+}
+
+func (r *recordingRuntime) AttachTerminal(
+	context.Context,
+	string,
+	int,
+	int,
+) (session.TerminalStream, error) {
+	return r.terminal, nil
+}
+
+type recordingTransport struct {
+	writes [][]byte
+	err    error
+}
+
+func (t *recordingTransport) Seed() pty.Message {
+	return pty.Message{}
+}
+
+func (t *recordingTransport) Output() <-chan pty.Message {
+	return make(chan pty.Message)
+}
+
+func (t *recordingTransport) Write(data []byte) error {
+	t.writes = append(t.writes, slices.Clone(data))
+	return t.err
+}
+
+func (t *recordingTransport) Resize(context.Context, int, int) error {
+	return nil
+}
+
+func (t *recordingTransport) Close() {}
+
+func TestCodexEscapeSettlesWorkingActivity(t *testing.T) {
+	terminal := &recordingTransport{}
+	current := &recordingRuntime{
+		agents: []agent.Agent{{
+			ID:          "agent-one",
+			Provider:    agent.ProviderCodex,
+			Activity:    agent.ActivityWorking,
+			ProcessLive: true,
+		}},
+		terminal: terminal,
+	}
+	service := NewService(current, provider.NewRegistry(), workspace.NewRegistry())
+	attached, err := service.AttachTerminal(
+		context.Background(), "agent-one", 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := attached.Write([]byte{0x1b}); err != nil {
+		t.Fatal(err)
+	}
+	if len(terminal.writes) != 1 || !slices.Equal(terminal.writes[0], []byte{0x1b}) {
+		t.Fatalf("terminal writes = %#v", terminal.writes)
+	}
+	if len(current.updates) != 1 ||
+		current.updates[0].Activity != agent.ActivityIdle {
+		t.Fatalf("updates = %#v, want one idle update", current.updates)
+	}
+	if current.agents[0].Activity != agent.ActivityIdle {
+		t.Fatalf("activity = %q, want idle", current.agents[0].Activity)
+	}
+}
+
+func TestTerminalInputDoesNotInventCodexInterrupts(t *testing.T) {
+	tests := []struct {
+		name      string
+		provider  agent.Provider
+		activity  agent.Activity
+		live      bool
+		input     []byte
+		writeErr  error
+		wantError bool
+	}{
+		{
+			name:     "escape sequence",
+			provider: agent.ProviderCodex,
+			activity: agent.ActivityWorking,
+			live:     true,
+			input:    []byte("\x1b[A"),
+		},
+		{
+			name:     "other provider",
+			provider: agent.ProviderClaude,
+			activity: agent.ActivityWorking,
+			live:     true,
+			input:    []byte{0x1b},
+		},
+		{
+			name:     "idle codex",
+			provider: agent.ProviderCodex,
+			activity: agent.ActivityIdle,
+			live:     true,
+			input:    []byte{0x1b},
+		},
+		{
+			name:     "exited codex",
+			provider: agent.ProviderCodex,
+			activity: agent.ActivityWorking,
+			input:    []byte{0x1b},
+		},
+		{
+			name:      "failed write",
+			provider:  agent.ProviderCodex,
+			activity:  agent.ActivityWorking,
+			live:      true,
+			input:     []byte{0x1b},
+			writeErr:  errors.New("write failed"),
+			wantError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			terminal := &recordingTransport{err: test.writeErr}
+			current := &recordingRuntime{
+				agents: []agent.Agent{{
+					ID:          "agent-one",
+					Provider:    test.provider,
+					Activity:    test.activity,
+					ProcessLive: test.live,
+				}},
+				terminal: terminal,
+			}
+			service := NewService(
+				current, provider.NewRegistry(), workspace.NewRegistry())
+			attached, err := service.AttachTerminal(
+				context.Background(), "agent-one", 80, 24)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = attached.Write(test.input)
+			if (err != nil) != test.wantError {
+				t.Fatalf("Write error = %v, want error %v", err, test.wantError)
+			}
+			if len(current.updates) != 0 {
+				t.Fatalf("updates = %#v, want none", current.updates)
+			}
+		})
+	}
 }
 
 func TestWorkspaceBackfillUsesRuntimeNeutralAgentID(t *testing.T) {

@@ -404,7 +404,9 @@ Stormlight injects agent-scoped lifecycle integration for managed providers:
   the same hook schema, so a Codex agent prompted in its own terminal turns
   blue like a Claude one; the notifier alone only fired at the end of a
   turn, which left a manually prompted agent claiming `idle` for the whole
-  time it was working.
+  time it was working. Codex reports neither surface when Esc aborts a turn,
+  so Stormlight observes that one terminal input and settles the agent idle
+  after forwarding it.
 - Claude uses `UserPromptSubmit`, `Notification`, and `Stop` hooks to report
   state; the permission notification raises attention on the agent whose
   terminal is holding the prompt.
